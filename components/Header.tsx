@@ -6,10 +6,12 @@ import { logoutAction } from "@/actions/auth";
 import Logo from "./Logo";
 
 // --- Client-only theme detection (hydration-safe via useSyncExternalStore) ---
+// We listen for a custom "themechange" event that toggleTheme dispatches
+// after mutating the DOM class + localStorage. This ensures the store
+// re-reads the snapshot on every toggle, not just the first one.
 function subscribe(callback: () => void) {
-  const mq = window.matchMedia("(prefers-color-scheme: dark)");
-  mq.addEventListener("change", callback);
-  return () => mq.removeEventListener("change", callback);
+  window.addEventListener("themechange", callback);
+  return () => window.removeEventListener("themechange", callback);
 }
 
 function getSnapshot() {
@@ -35,7 +37,7 @@ export default function Header({ username }: { username: string }) {
       localStorage.setItem("theme", "light");
     }
     // Dispatch a custom event so useSyncExternalStore re-reads the snapshot
-    window.dispatchEvent(new Event("change"));
+    window.dispatchEvent(new Event("themechange"));
   }
 
   return (
