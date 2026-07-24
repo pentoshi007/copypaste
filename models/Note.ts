@@ -6,13 +6,11 @@ const noteSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true,
     },
     chatId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Chat",
       required: true,
-      index: true,
     },
     type: {
       type: String,
@@ -38,11 +36,17 @@ const noteSchema = new mongoose.Schema(
     createdAt: {
       type: Date,
       default: Date.now,
-      index: -1, // descending — latest note first
     },
   },
   { collection: "notes" }
 );
+
+// Compound index: covers the primary query pattern
+//   Note.find({ userId, chatId }).sort({ createdAt: 1 })
+// ESR rule: Equality (userId, chatId) → Sort (createdAt)
+// A single compound index replaces three separate single-field indexes
+// and lets MongoDB serve the sorted query without an in-memory sort.
+noteSchema.index({ userId: 1, chatId: 1, createdAt: 1 });
 
 export type NoteDoc = InferSchemaType<typeof noteSchema>;
 

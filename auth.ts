@@ -41,7 +41,12 @@ export const {
 
         try {
           await dbConnect();
-          const user = await User.findOne({ username }).lean();
+          // Use .select() to exclude passwordHash from the hydrated doc —
+          // we only need _id and passwordHash for auth
+          const user = await User.findOne(
+            { username },
+            { passwordHash: 1 }
+          ).lean();
           if (!user || !user.passwordHash) return null;
 
           const ok = await bcrypt.compare(password, user.passwordHash);

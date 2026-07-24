@@ -23,6 +23,10 @@ export type CreateNoteResult = {
   chatTitle?: string;
 };
 
+// Fields needed when serializing a note for the client
+const NOTE_PROJECTION =
+  "_id chatId type content imageUrl publicId language createdAt";
+
 export async function createNote(
   input: z.infer<typeof createNoteSchema>
 ): Promise<CreateNoteResult> {
@@ -67,7 +71,11 @@ export async function createNote(
     await dbConnect();
 
     // CRITICAL: verify the chat belongs to this user (IDOR prevention)
-    const chat = await Chat.findOne({ _id: chatId, userId: session.user.id });
+    // Use .lean() + .select() — we only need title for auto-naming
+    const chat = await Chat.findOne(
+      { _id: chatId, userId: session.user.id },
+      { title: 1 }
+    ).lean();
     if (!chat) {
       return { error: "Chat not found" };
     }
@@ -89,18 +97,15 @@ export async function createNote(
         chatTitle = content.trim() || "Image";
       } else {
         const c = content.trim();
-        chatTitle = c.length > 50 ? c.slice(0, 47) + "…" : c || "New Chat";
+        chatTitle = c.length > 50 ? c.slice(0, 47) + "..." : c || "New Chat";
       }
-      await Chat.updateOne(
-        { _id: chatId, userId: session.user.id },
-        { title: chatTitle, updatedAt: new Date() }
-      );
-    } else {
-      await Chat.updateOne(
-        { _id: chatId, userId: session.user.id },
-        { updatedAt: new Date() }
-      );
     }
+
+    // Single updateOne — no need to fetch the doc back
+    await Chat.updateOne(
+      { _id: chatId, userId: session.user.id },
+      { title: chatTitle, updatedAt: new Date() }
+    );
 
     const note: NoteItem = {
       _id: String(doc._id),
@@ -141,18 +146,22 @@ export async function updateNote(
 
   const { noteId, content, language } = parsed.data;
 
-  // Link type: validate URL scheme (http/https only — blocks javascript:/data:)
   try {
     await dbConnect();
 
     // CRITICAL: scope by userId to prevent IDOR — never update by id alone
-    const note = await Note.findOne({ _id: noteId, userId: session.user.id });
-    if (!note) {
+    // Use findOne to check type for link validation (lean, minimal fields)
+    const existing = await Note.findOne(
+      { _id: noteId, userId: session.user.id },
+      { type: 1 }
+    ).lean();
+
+    if (!existing) {
       return { error: "Note not found" };
     }
 
     // If it's a link, validate the URL
-    if (note.type === "link") {
+    if (existing.type === "link") {
       const urlCheck = z
         .string()
         .url()
@@ -171,25 +180,33 @@ export async function updateNote(
       }
     }
 
-    note.content = content;
-    if (note.type === "code" && language) {
-      note.language = language;
-    }
-    await note.save();
+    // Single atomic update — no need to fetch, modify, then save
+    const updated = await Note.findOneAndUpdate(
+      { _id: noteId, userId: session.user.id },
+      {
+        content,
+        language: existing.type === "code" ? language : undefined,
+      },
+      { new: true, select: NOTE_PROJECTION }
+    ).lean();
 
-    const updated: NoteItem = {
-      _id: String(note._id),
-      chatId: String(note.chatId),
-      type: note.type as NoteType,
-      content: note.content ?? "",
-      imageUrl: note.imageUrl ?? "",
-      publicId: note.publicId ?? "",
-      language: note.language ?? "",
-      createdAt: serializeDate(note.createdAt),
+    if (!updated) {
+      return { error: "Note not found" };
+    }
+
+    const note: NoteItem = {
+      _id: String(updated._id),
+      chatId: String(updated.chatId),
+      type: updated.type as NoteType,
+      content: updated.content ?? "",
+      imageUrl: updated.imageUrl ?? "",
+      publicId: updated.publicId ?? "",
+      language: updated.language ?? "",
+      createdAt: serializeDate(updated.createdAt),
     };
 
     revalidatePath("/");
-    return { note: updated };
+    return { note };
   } catch {
     return { error: "Failed to update note" };
   }
@@ -216,13 +233,18 @@ export async function deleteNote(
   try {
     await dbConnect();
 
-    // CRITICAL: scope by userId to prevent IDOR — never delete by id alone
-    const note = await Note.findOne({ _id: noteId, userId: session.user.id });
+    // CRITICAL: scope by userId to prevent IDOR — use findOneAndDelete
+    // to collapse fetch + delete into a single atomic operation
+    const note = await Note.findOneAndDelete(
+      { _id: noteId, userId: session.user.id },
+      { select: "publicId" }
+    ).lean();
+
     if (!note) {
       return { error: "Note not found" };
     }
 
-    // Best-effort Cloudinary cleanup for image notes
+    // Best-effort Cloudinary cleanup for image notes (fire-and-forget)
     if (note.publicId) {
       try {
         const cloudinary = (await import("cloudinary")).default;
@@ -232,7 +254,6 @@ export async function deleteNote(
       }
     }
 
-    await Note.deleteOne({ _id: noteId, userId: session.user.id });
     revalidatePath("/");
     return { ok: true };
   } catch {

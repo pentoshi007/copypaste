@@ -249,6 +249,37 @@ Before going to production, consider these upgrades:
 - [ ] **Monitoring** — Add error tracking (Sentry) and log aggregation.
 - [ ] **Database backups** — Enable Atlas backups for production data.
 
+## Performance Optimizations
+
+The database layer has been tuned for fast note loading and minimal overhead:
+
+### Compound indexes (ESR rule)
+- **Note**: `{ userId: 1, chatId: 1, createdAt: 1 }` — serves the primary query `Note.find({ userId, chatId }).sort({ createdAt: 1 })` with a single index scan, no in-memory sort. Replaces three separate single-field indexes.
+- **Chat**: `{ userId: 1, updatedAt: -1 }` — serves `Chat.find({ userId }).sort({ updatedAt: -1 })` efficiently.
+
+### Lean queries + field projections
+- All read paths use `.lean()` — skips Mongoose document hydration (getters, setters, change tracking), returning plain JS objects (2–5× faster, ~5× less memory).
+- `.select()` / projection objects on every query fetch only the fields the client needs — no over-fetching.
+
+### Query result caps
+- `.limit(500)` on note fetches and `.limit(200)` on chat list — prevents unbounded scans on very old accounts while being well above any realistic usage.
+
+### Collapsed multi-query patterns
+- `deleteNote` uses `findOneAndDelete` (single atomic op) instead of `findOne` + `deleteOne` (two round-trips).
+- `updateChatTitle` uses `findOneAndUpdate` with `{ new: true }` instead of `findOne` + `save()`.
+- `updateNote` uses `findOneAndUpdate` instead of fetch-modify-save.
+- `deleteChat` uses `findOneAndDelete` for the chat, then `deleteMany` for notes.
+
+### Parallel Cloudinary cleanup
+- `deleteChat` now runs all `cloudinary.v2.uploader.destroy()` calls concurrently via `Promise.allSettled` instead of sequentially — significantly faster when a chat has multiple image notes.
+
+### Connection pool tuning
+- `minPoolSize: 1` keeps a warm connection ready for the first request after idle.
+- `connectTimeoutMS: 10000` and `socketTimeoutMS: 45000` prevent hung connections from blocking the pool.
+
+### Auth query optimization
+- `authorize()` in `auth.ts` uses `.select({ passwordHash: 1 })` — fetches only the hash needed for bcrypt comparison, not the full user document.
+
 ## Scripts
 
 | Command | Description |

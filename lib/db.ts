@@ -30,7 +30,10 @@ async function dbConnect(): Promise<Connection> {
     const opts: mongoose.ConnectOptions = {
       bufferCommands: false,
       maxPoolSize: 10,
+      minPoolSize: 1,
       serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
     };
 
     const promise = mongoose

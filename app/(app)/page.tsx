@@ -14,8 +14,13 @@ export default async function HomePage() {
   await dbConnect();
 
   // Fetch all chats for this user, sorted by updatedAt desc (most recent first)
-  const chats = (await Chat.find({ userId })
+  // Use .select() projection + .lean() for fast read-only access
+  const chats = (await Chat.find(
+    { userId },
+    { _id: 1, title: 1, createdAt: 1, updatedAt: 1 }
+  )
     .sort({ updatedAt: -1 })
+    .limit(200) // safety cap
     .lean()) as unknown as ChatItem[];
 
   const serializedChats: ChatItem[] = chats.map((c) => ({
@@ -26,11 +31,25 @@ export default async function HomePage() {
   }));
 
   // Fetch notes for the most recently updated chat (if any)
+  // Use .select() projection + .lean() + .limit() for fast reads
   let serializedNotes: NoteItem[] = [];
   if (serializedChats.length > 0) {
     const activeChatId = serializedChats[0]._id;
-    const notes = (await Note.find({ userId, chatId: activeChatId })
+    const notes = (await Note.find(
+      { userId, chatId: activeChatId },
+      {
+        _id: 1,
+        chatId: 1,
+        type: 1,
+        content: 1,
+        imageUrl: 1,
+        publicId: 1,
+        language: 1,
+        createdAt: 1,
+      }
+    )
       .sort({ createdAt: 1 }) // ascending — oldest first, like a chat
+      .limit(500) // safety cap
       .lean()) as unknown as NoteItem[];
 
     serializedNotes = notes.map((n) => ({

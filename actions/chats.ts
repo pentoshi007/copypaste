@@ -72,11 +72,12 @@ export async function updateChatTitle(
     await dbConnect();
 
     // CRITICAL: scope by userId to prevent IDOR
+    // Atomic update — no need to fetch first
     const doc = await Chat.findOneAndUpdate(
       { _id: chatId, userId: session.user.id },
       { title: titleCheck.data, updatedAt: new Date() },
-      { new: true }
-    );
+      { new: true, select: "_id title createdAt updatedAt" }
+    ).lean();
 
     if (!doc) {
       return { error: "Chat not found" };
@@ -112,33 +113,40 @@ export async function deleteChat(
   try {
     await dbConnect();
 
-    // CRITICAL: scope by userId to prevent IDOR — never delete by id alone
-    const chat = await Chat.findOne({ _id: chatId, userId: session.user.id });
+    // CRITICAL: scope by userId to prevent IDOR — use findOneAndDelete
+    const chat = await Chat.findOneAndDelete(
+      { _id: chatId, userId: session.user.id },
+      { select: "_id" }
+    ).lean();
+
     if (!chat) {
       return { error: "Chat not found" };
     }
 
-    // Find all notes in this chat (for Cloudinary cleanup)
-    const notes = await Note.find({ chatId, userId: session.user.id })
-      .select("publicId")
-      .lean();
+    // Find all note publicIds for Cloudinary cleanup (projection: only publicId)
+    const notes = await Note.find(
+      { chatId, userId: session.user.id, publicId: { $ne: "" } },
+      { publicId: 1 }
+    ).lean();
 
-    // Best-effort Cloudinary cleanup for image notes
-    for (const note of notes) {
-      if (note.publicId) {
-        try {
-          const cloudinary = (await import("cloudinary")).default;
-          await cloudinary.v2.uploader.destroy(note.publicId).catch(() => {});
-        } catch {
-          // non-fatal
-        }
+    // Parallel Cloudinary cleanup — fire all destroys concurrently
+    if (notes.length > 0) {
+      try {
+        const cloudinary = (await import("cloudinary")).default;
+        await Promise.allSettled(
+          notes.map((n) =>
+            n.publicId
+              ? cloudinary.v2.uploader.destroy(n.publicId).catch(() => {})
+              : Promise.resolve()
+          )
+        );
+      } catch {
+        // non-fatal
       }
     }
 
     // Delete all notes in this chat
     await Note.deleteMany({ chatId, userId: session.user.id });
-    // Delete the chat itself
-    await Chat.deleteOne({ _id: chatId, userId: session.user.id });
 
     revalidatePath("/");
     return { ok: true };

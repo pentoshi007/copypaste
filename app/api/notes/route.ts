@@ -21,8 +21,24 @@ export async function GET(request: Request) {
     await dbConnect();
 
     // CRITICAL: scope by userId to prevent IDOR — never trust client chatId alone
-    const notes = (await Note.find({ chatId, userId: session.user.id })
+    // Use .select() projection to fetch only the fields the client needs,
+    // .lean() to skip Mongoose document hydration (2-5x faster),
+    // and .limit() to cap the result set.
+    const notes = (await Note.find(
+      { chatId, userId: session.user.id },
+      {
+        _id: 1,
+        chatId: 1,
+        type: 1,
+        content: 1,
+        imageUrl: 1,
+        publicId: 1,
+        language: 1,
+        createdAt: 1,
+      }
+    )
       .sort({ createdAt: 1 }) // ascending — oldest first, like a chat
+      .limit(500) // safety cap — prevents unbounded scans on very old chats
       .lean()) as unknown as NoteItem[];
 
     const serialized: NoteItem[] = notes.map((n) => ({
