@@ -6,6 +6,7 @@ import CodeBlock from "./CodeBlock";
 import LinkBlock from "./LinkBlock";
 import ImageBlock from "./ImageBlock";
 import FileBlock from "./FileBlock";
+import LocalTime from "./LocalTime";
 import { Trash2, Loader2, Pencil, Check, X } from "lucide-react";
 import { memo, useState, useTransition } from "react";
 import { deleteNote, updateNote } from "@/actions/notes";
@@ -107,16 +108,16 @@ function NoteView({
       >
         <div className="px-3 sm:px-4 py-2 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="text-xs text-slate-400 whitespace-nowrap">
-              {isPendingNote
-                ? "Sending…"
-                : new Date(note.createdAt).toLocaleString(undefined, {
-                    month: "short",
-                    day: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-            </span>
+            {isPendingNote ? (
+              <span className="text-xs text-slate-400 whitespace-nowrap">
+                Sending…
+              </span>
+            ) : (
+              <LocalTime
+                iso={note.createdAt}
+                className="text-xs text-slate-400 whitespace-nowrap"
+              />
+            )}
             <span className="text-xs font-medium text-slate-400 uppercase tracking-wide">
               {note.type}
             </span>

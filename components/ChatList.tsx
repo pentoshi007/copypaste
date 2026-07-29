@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import type { ChatItem } from "@/lib/types";
 import { createChat, updateChatTitle, deleteChat } from "@/actions/chats";
+import LocalTime from "./LocalTime";
 import { toast } from "sonner";
 import {
   Plus,
@@ -204,14 +205,10 @@ export default function ChatList({
                             <p className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate">
                               {chat.title}
                             </p>
-                            <p className="text-xs text-slate-400 mt-0.5">
-                              {new Date(chat.updatedAt).toLocaleString(undefined, {
-                                month: "short",
-                                day: "numeric",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
-                            </p>
+                            <LocalTime
+                              iso={chat.updatedAt}
+                              className="block text-xs text-slate-400 mt-0.5"
+                            />
                           </div>
                         </div>
                       </button>

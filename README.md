@@ -13,6 +13,12 @@ Notes are organized into **chats** (like conversation threads). Each chat auto-t
   - **Link** — copy URL or open in a new tab (`rel="noopener noreferrer"`). Only `http`/`https` URLs accepted — `javascript:` and `data:` schemes are rejected by Zod validation.
   - **Image** — upload to Cloudinary, copy-to-clipboard, download, and view full-size. Thumbnails use on-the-fly Cloudinary transforms (`c_limit,w_520,f_auto,q_auto`).
   - **File** — any non-image file (documents, archives, audio, video) stored in a **private** Cloudflare R2 bucket. Uploaded straight from the browser with a presigned PUT and progress bar; downloaded through an ownership-checked redirect that preserves the original filename.
+- **In-app previews** for attachments, mounted only when asked for so a chat full of files doesn't fetch them all on load:
+  - **PDF** renders in an iframe served straight from Cloudflare's edge, so range requests let page 1 appear without downloading the whole document.
+  - **Video / audio** use the native players, also range-served.
+  - **Text, code, CSV, logs** are read through a bounded `Range` request (first 512 KB) and rendered as escaped text — previewing a 50 MB log costs one small read.
+  - **Word / Excel / PowerPoint** are download-only. Browsers can't render them, and the alternative is shipping a signed URL to Microsoft's or Google's viewer, which would send private files to a third party.
+- **Installable (PWA)** — web app manifest with maskable icons, a static-asset service worker, and safe-area handling so it behaves correctly in standalone mode.
 - **Cross-device sync** — MongoDB Atlas stores everything per-user. Log in on any device and your chats and notes are there.
 - **Opens at latest chat** — the most recently updated chat is selected on load.
 - **Input methods** — type, paste (the clipboard `paste` handler picks up images *and* files), drag-and-drop, or the attach button. Images route to Cloudinary and everything else to R2 automatically.
@@ -151,8 +157,8 @@ itself is valid.
 [
   {
     "AllowedOrigins": [
-      "http://localhost:3000",
-      "https://your-app.vercel.app"
+      "https://copypaste.aniketpandey.website",
+      "http://localhost:3000"
     ],
     "AllowedMethods": ["PUT"],
     "AllowedHeaders": ["content-type", "content-disposition"],
@@ -162,8 +168,10 @@ itself is valid.
 ]
 ```
 
-Replace `https://your-app.vercel.app` with your real deployed origin. Only `PUT` is
-needed — downloads don't go through CORS (see below).
+`AllowedOrigins` must list the exact deployed origin, scheme included. Only `PUT` is
+needed — downloads and previews go through redirects, not cross-origin fetches, so
+they never trigger CORS. Note that Vercel preview deployments get generated
+hostnames that won't match; add `https://*.vercel.app` if you upload from those.
 
 ### 3. Leave public access disabled
 
@@ -177,10 +185,22 @@ The bucket should stay private:
   belongs to the logged-in user and then `302`s to a presigned `GET` valid for 2
   minutes. Because that's a top-level navigation, no CORS configuration is involved.
 
-`Content-Disposition: attachment; filename="…"` is written onto the object at upload
-time, so downloads keep their original name. R2 does **not** support the
-`response-content-disposition` query override on `GetObject`, which is why it has to
-be set on the way in.
+`Content-Disposition` is written onto the object at upload time, so downloads keep
+their original name. R2 does **not** support the `response-content-disposition` query
+override on `GetObject`, so the choice is permanent per object and is made from the
+file's type:
+
+- `inline` for PDF, image, video and audio — the formats a browser renders natively,
+  which is what makes the in-app preview possible.
+- `attachment` for everything else.
+
+Text and HTML are deliberately `attachment`. Serving an uploaded `.html` inline from
+the storage hostname would make it a stored-XSS vector on that origin, so text
+previews are read through `/api/files/[noteId]/text` instead, which returns JSON that
+the client renders as escaped text.
+
+> Files uploaded before this behaviour existed were all stored as `attachment`, so
+> they download instead of previewing. Re-upload them to get previews.
 
 ### Free tier
 

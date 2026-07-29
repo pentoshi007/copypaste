@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "sonner";
+import ServiceWorkerRegistrar from "@/components/ServiceWorkerRegistrar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -21,12 +22,30 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "CopyPaste — Cross-device clipboard",
   description:
-    "Sync text, code, links, and images across your devices instantly.",
+    "Sync text, code, links, images, and files across your devices instantly.",
+  applicationName: "CopyPaste",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: "/icon.svg",
+    apple: "/icons/apple-touch-icon.png",
+  },
+  appleWebApp: {
+    capable: true,
+    title: "CopyPaste",
+    // Lets the app paint behind the status bar when installed on iOS, which is
+    // what makes the safe-area insets below meaningful.
+    statusBarStyle: "black-translucent",
+  },
+  formatDetection: { telephone: false },
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  // Required for env(safe-area-inset-*) to report anything but zero. Without it
+  // the composer's safe-area padding is a no-op and, once installed as a PWA,
+  // the send button sits under the iOS home indicator.
+  viewportFit: "cover",
   // Tell mobile browsers to shrink the *layout* viewport when the software
   // keyboard opens instead of overlaying it. Without this, the bottom of the
   // app (the composer's send button) ends up underneath the keyboard and,
@@ -63,6 +82,7 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
         {children}
         <Toaster position="top-center" richColors closeButton duration={2200} />
+        <ServiceWorkerRegistrar />
       </body>
     </html>
   );

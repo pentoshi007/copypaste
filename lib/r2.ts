@@ -1,4 +1,5 @@
 import { AwsClient } from "aws4fetch";
+import { isInlineViewable } from "@/lib/preview";
 
 /**
  * Cloudflare R2 access for file attachments (everything that isn't an image —
@@ -102,13 +103,48 @@ export function buildFileKey(userId: string, fileName: string): string {
  *
  * The plain `filename=` parameter is ASCII-only for old clients; `filename*`
  * carries the real UTF-8 name per RFC 5987.
+ *
+ * The disposition is chosen once, at upload: R2 doesn't support the
+ * `response-content-disposition` override on GetObject, so it can't be varied
+ * per request. `inline` for formats a browser renders natively (so they can be
+ * previewed in-app), `attachment` for everything else.
  */
-export function contentDispositionFor(fileName: string): string {
+export function contentDispositionFor(
+  fileName: string,
+  mimeType = ""
+): string {
   const safe = sanitizeFileName(fileName);
   const ascii = safe.replace(/[^\u0020-\u007e]/g, "_");
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(
+  const kind = isInlineViewable(mimeType, safe) ? "inline" : "attachment";
+  return `${kind}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(
     safe
   )}`;
+}
+
+/**
+ * Fetches the first `maxBytes` of an object.
+ *
+ * Used for text previews: a Range request means a 50MB log file costs one small
+ * read instead of streaming the whole thing.
+ */
+export async function getObjectRange(
+  config: R2Config,
+  key: string,
+  maxBytes: number
+): Promise<{ body: string; truncated: boolean } | null> {
+  const client = getClient(config);
+  try {
+    const res = await client.fetch(objectEndpoint(config, key), {
+      method: "GET",
+      headers: { Range: `bytes=0-${maxBytes - 1}` },
+    });
+    // 206 = partial (truncated), 200 = whole object fit inside the range.
+    if (res.status !== 200 && res.status !== 206) return null;
+    const body = await res.text();
+    return { body, truncated: res.status === 206 };
+  } catch {
+    return null;
+  }
 }
 
 /**

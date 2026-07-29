@@ -41,7 +41,9 @@ export default function Header({ username }: { username: string }) {
   }
 
   return (
-    <header className="shrink-0 z-30 border-b border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md">
+    // The top inset is zero in a normal browser tab; it only matters once the
+    // app is installed and painting behind the status bar.
+    <header className="shrink-0 z-30 border-b border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md pt-[env(safe-area-inset-top,0px)]">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 h-14 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Logo className="w-8 h-8" />

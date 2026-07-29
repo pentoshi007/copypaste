@@ -15,7 +15,12 @@ const csp = [
   "default-src 'self'",
   "base-uri 'self'",
   "object-src 'none'",
-  "frame-ancestors 'none'",
+  // 'self' rather than 'none': the PDF preview frames our own /api/files route,
+  // and 'none' would block that too. Third-party framing is still refused.
+  "frame-ancestors 'self'",
+  // /api/files redirects to the storage origin, so the frame and media sources
+  // have to allow it as well as 'self'.
+  "frame-src 'self' https://*.r2.cloudflarestorage.com",
   "form-action 'self'",
   "script-src 'self' 'unsafe-inline'",
   // Tailwind and inline style attributes.
@@ -25,7 +30,7 @@ const csp = [
   "font-src 'self' data:",
   // Direct uploads go to Cloudinary and R2 from the browser.
   "connect-src 'self' https://api.cloudinary.com https://res.cloudinary.com https://*.r2.cloudflarestorage.com",
-  "media-src 'self' blob: https://res.cloudinary.com",
+  "media-src 'self' blob: https://res.cloudinary.com https://*.r2.cloudflarestorage.com",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
   // Production only: on a dev machine this would rewrite
@@ -39,7 +44,9 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   // Don't leak note contents via the Referer header to third parties.
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-  { key: "X-Frame-Options", value: "DENY" },
+  // SAMEORIGIN, not DENY: DENY also blocks framing by our own pages, which would
+  // break the in-app PDF preview. Cross-origin framing is still refused.
+  { key: "X-Frame-Options", value: "SAMEORIGIN" },
   {
     key: "Permissions-Policy",
     value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",

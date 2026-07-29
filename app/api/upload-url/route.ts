@@ -115,7 +115,12 @@ export async function POST(request: Request) {
         // The client must send these verbatim so R2 stores them as metadata.
         headers: {
           "Content-Type": contentType,
-          "Content-Disposition": contentDispositionFor(fileName),
+          // inline for natively-viewable formats so they can be previewed
+          // in-app; attachment for everything else.
+          "Content-Disposition": contentDispositionFor(fileName, contentType),
+          // Objects are immutable (the key contains a random segment), so a long
+          // browser cache is safe and makes repeat previews instant.
+          "Cache-Control": "private, max-age=31536000, immutable",
         },
       },
       { headers: { "Cache-Control": "private, no-store" } }
