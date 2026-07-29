@@ -13,13 +13,26 @@ export default function ImageBlock({
 }) {
   const [showFull, setShowFull] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState<"copy" | "download" | null>(null);
+  const [busy, setBusy] = useState<"copy" | null>(null);
 
   // Cloudinary resizes/reformats on delivery, so we ask for exactly what the
   // layout needs (plus a 2x variant) instead of the full-resolution original.
   const thumbnailUrl = buildCloudinaryTransform(imageUrl, "c_limit,w_520,f_auto,q_auto");
   const thumbnailUrl2x = buildCloudinaryTransform(imageUrl, "c_limit,w_1040,f_auto,q_auto");
   const fullUrl = buildCloudinaryTransform(imageUrl, "f_auto,q_auto");
+
+  // `fl_attachment` makes Cloudinary send Content-Disposition: attachment, so the
+  // browser downloads this straight from the CDN as a normal navigation.
+  //
+  // This used to fetch the image into a Blob and hand it to a synthetic <a>,
+  // which meant the whole file was pulled through JS and held in memory a second
+  // time — slow and memory-hungry on a large photo, and it gave up the browser's
+  // own download UI and progress. The filename is baked into the URL because the
+  // `download` attribute is ignored on a cross-origin response.
+  const downloadUrl = buildCloudinaryTransform(
+    imageUrl,
+    `fl_attachment:${downloadName(imageUrl)}`
+  );
 
   const handleCopy = useCallback(async () => {
     setBusy("copy");
@@ -39,27 +52,6 @@ export default function ImageBlock({
       setBusy(null);
     }
   }, [imageUrl, thumbnailUrl]);
-
-  const handleDownload = useCallback(async () => {
-    setBusy("download");
-    try {
-      const res = await fetch(fullUrl);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `copypaste-${Date.now()}.${blob.type.split("/")[1] || "png"}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      toast.success("Image downloaded");
-    } catch {
-      toast.error("Failed to download");
-    } finally {
-      setBusy(null);
-    }
-  }, [fullUrl]);
 
   // Escape closes the lightbox, and the page behind it shouldn't scroll.
   useEffect(() => {
@@ -124,18 +116,15 @@ export default function ImageBlock({
           )}
           Copy
         </button>
-        <button
-          onClick={handleDownload}
-          disabled={busy !== null}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-50 text-sm transition"
+        <a
+          href={downloadUrl}
+          download
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 text-sm transition"
+          aria-label="Download image"
         >
-          {busy === "download" ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Download className="w-4 h-4" />
-          )}
+          <Download className="w-4 h-4" />
           Download
-        </button>
+        </a>
       </div>
 
       {showFull && (
@@ -171,6 +160,20 @@ export default function ImageBlock({
  * upload URL format: https://res.cloudinary.com/<cloud>/image/upload/v<version>/<public_id>.<ext>
  * We insert the transform string after "/upload/".
  */
+/**
+ * A download filename derived from the asset's own id.
+ *
+ * Image notes don't store a filename, so this uses the random segment Cloudinary
+ * was given at upload. A fixed name would make every image in a chat download as
+ * `copypaste-image.png`, `copypaste-image(1).png`, and so on. Cloudinary appends
+ * the correct extension itself.
+ */
+function downloadName(url: string): string {
+  const lastSegment = url.split("?")[0].split("/").pop() ?? "";
+  const id = lastSegment.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_-]/g, "");
+  return id ? `copypaste-${id}` : "copypaste-image";
+}
+
 function buildCloudinaryTransform(url: string, transform: string): string {
   if (!url) return url;
   // Only transform Cloudinary URLs

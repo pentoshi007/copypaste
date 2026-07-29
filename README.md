@@ -11,7 +11,7 @@ Notes are organized into **chats** (like conversation threads). Each chat auto-t
   - **Text** — copy to clipboard with one tap.
   - **Code** — syntax-highlighted (Prism) with a copy-block button and language label.
   - **Link** — copy URL or open in a new tab (`rel="noopener noreferrer"`). Only `http`/`https` URLs accepted — `javascript:` and `data:` schemes are rejected by Zod validation.
-  - **Image** — upload to Cloudinary, copy-to-clipboard, download, and view full-size. Thumbnails use on-the-fly Cloudinary transforms (`c_limit,w_520,f_auto,q_auto`).
+  - **Image** — upload to Cloudinary, copy-to-clipboard, download, and view full-size. Thumbnails use on-the-fly Cloudinary transforms (`c_limit,w_520,f_auto,q_auto`). Downloads are a plain link to an `fl_attachment` URL, so the file goes straight from the CDN to disk with the browser's own progress UI instead of being buffered through JS a second time.
   - **File** — any non-image file (documents, archives, audio, video) stored in a **private** Cloudflare R2 bucket. Uploaded straight from the browser with a presigned PUT and progress bar; downloaded through an ownership-checked redirect that preserves the original filename.
 - **In-app previews** for attachments, mounted only when asked for so a chat full of files doesn't fetch them all on load:
   - **PDF** renders in an iframe served straight from Cloudflare's edge, so range requests let page 1 appear without downloading the whole document.
@@ -22,7 +22,9 @@ Notes are organized into **chats** (like conversation threads). Each chat auto-t
 - **Search across every chat** — `⌘/Ctrl+K`, or the field in the sidebar (a search icon in the composer toolbar on mobile). Matches message text, image and file captions, and attachment filenames, with the hit highlighted in context and labelled with the chat it came from. Selecting a result opens that chat and scrolls straight to the note. Debounced, with each keystroke aborting the request in flight so a slow response for `re` can't overwrite the results for `report`.
 - **Cross-device sync** — MongoDB Atlas stores everything per-user. Log in on any device and your chats and notes are there.
 - **Opens at latest chat** — the most recently updated chat is selected on load.
-- **Input methods** — type, paste (the clipboard `paste` handler picks up images *and* files), drag-and-drop, or the attach button. Images route to Cloudinary and everything else to R2 automatically.
+- **Input methods** — type, paste (the clipboard `paste` handler picks up images *and* files), drag-and-drop, or the attach button.
+- **Multi-file send, mixed types** — select up to 20 files at once and each one is classified on its own: images go to Cloudinary, everything else to a presigned R2 PUT, and each file becomes its own note. Transfers run three at a time (serial wastes the uplink on connection setup; all-at-once makes every file finish late), each with its own progress bar, cancel and retry. One failure doesn't sink the batch. Where the browser reports no MIME type — common for cloud-drive pickers and some archive managers — it's inferred from the extension, because R2 can't override a stored content type later and a PDF saved as `application/octet-stream` would never preview. A photo over Cloudinary's 10 MB limit is sent to R2 as a file attachment rather than rejected.
+- **Refresh** — a button in the navbar refetches the chat list and the open chat's notes. Two scoped JSON requests rather than reloading the whole dynamic page, so a note added on another device shows up without losing scroll position.
 - **Per-note delete** within a chat; **per-chat delete** removes the chat and all its notes, cleaning up both Cloudinary assets and R2 objects after the response is flushed.
 - **Responsive** — split-pane on desktop (chat list | notes + editor), stacked on mobile.
 - **Dark mode** — Tailwind `class` strategy, toggle persisted to `localStorage`.

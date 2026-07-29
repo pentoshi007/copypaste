@@ -17,7 +17,7 @@ import { v2 as cloudinary } from "cloudinary";
  * entirely.
  *
  * The generated `public_id` is namespaced under the authenticated user
- * (`u/<userId>/<random>`), which is what lets `createNote` verify that an image
+ * (`u/<userId>/<random>`), which is what lets `createNotes` verify that an image
  * a user claims actually belongs to them.
  */
 
@@ -37,9 +37,11 @@ export async function POST() {
     );
   }
 
+  // Sized to cover a full multi-file send (one signature per image) with room
+  // for several batches in a minute.
   if (
     !rateLimit("upload-sign", session.user.id, {
-      maxAttempts: 40,
+      maxAttempts: 120,
       windowMs: 60_000,
     })
   ) {

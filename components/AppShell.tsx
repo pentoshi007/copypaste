@@ -7,7 +7,8 @@ import NoteView from "@/components/NoteView";
 import ChatList from "@/components/ChatList";
 import SearchPanel from "@/components/SearchPanel";
 import { createChat } from "@/actions/chats";
-import { createNote } from "@/actions/notes";
+import { createNotes } from "@/actions/notes";
+import { onRefreshRequest, setRefreshing } from "@/lib/refresh";
 import { toast } from "sonner";
 import { MessageSquare } from "lucide-react";
 
@@ -55,6 +56,11 @@ export default function AppShell({
   const inFlightRef = useRef<Map<string, Promise<NoteItem[] | null>>>(new Map());
   // The chat the user most recently asked for; stale responses are discarded.
   const wantedChatRef = useRef<string | null>(initialChats[0]?._id ?? null);
+  // Whether a send is awaiting the server, and how many have completed. Between
+  // them a refresh can tell that a send overlapped its request and that its own
+  // (possibly pre-insert) response must not replace the notes list.
+  const sendingRef = useRef(false);
+  const sendSeqRef = useRef(0);
 
   const listRef = useRef<HTMLDivElement>(null);
   // Set when a search result targets a note that isn't rendered yet; consumed
@@ -93,8 +99,11 @@ export default function AppShell({
   }, [isNearBottom, scrollToBottom]);
 
   // ---- Fetching ------------------------------------------------------------
-  const fetchNotes = useCallback((chatId: string) => {
-    const existing = inFlightRef.current.get(chatId);
+  const fetchNotes = useCallback((chatId: string, force = false) => {
+    // An explicit refresh must actually hit the server. Reusing an in-flight
+    // request is right for a chat switch, but pressing refresh while one was
+    // already running would otherwise resolve with that older response.
+    const existing = force ? undefined : inFlightRef.current.get(chatId);
     if (existing) return existing;
 
     const request = fetch(`/api/notes?chatId=${encodeURIComponent(chatId)}`)
@@ -228,8 +237,10 @@ export default function AppShell({
    * swapped for the saved copy or rolled back. Sending feels instant even on a
    * slow connection.
    */
-  const handleSubmitNote = useCallback(
-    async (draft: NoteDraft): Promise<boolean> => {
+  const handleSubmitNotes = useCallback(
+    async (drafts: NoteDraft[]): Promise<boolean> => {
+      if (drafts.length === 0) return false;
+
       let chatId = activeChatId;
 
       if (!chatId) {
@@ -246,51 +257,107 @@ export default function AppShell({
         setNotes([]);
         setNotesLoading(false);
       }
+      // Narrowing on a `let` doesn't survive into the closures below.
+      const targetChatId = chatId;
 
-      const tempId = `pending-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-      const optimistic: NoteItem = {
-        _id: tempId,
-        chatId,
+      const stamp = Date.now();
+      const suffix = Math.random().toString(36).slice(2, 8);
+      // Timestamps are staggered so a batch keeps its selection order, matching
+      // what the server assigns when it inserts them.
+      const optimistic: NoteItem[] = drafts.map((draft, i) => ({
+        _id: `pending-${stamp}-${i}-${suffix}`,
+        chatId: targetChatId,
         type: draft.type,
         content: draft.content,
         imageUrl: draft.imageUrl,
         publicId: draft.publicId,
         language: draft.language,
-        createdAt: new Date().toISOString(),
+        createdAt: new Date(stamp + i).toISOString(),
         fileName: draft.fileName ?? "",
         fileSize: draft.fileSize ?? 0,
         mimeType: draft.mimeType ?? "",
         pending: true,
-      };
+      }));
+      const tempIds = optimistic.map((n) => n._id);
 
-      setNotes((prev) => [...prev, optimistic]);
+      setNotes((prev) => [...prev, ...optimistic]);
       requestAnimationFrame(() => scrollToBottom("smooth"));
 
-      const result = await createNote({
-        chatId,
-        type: draft.type,
-        content: draft.content,
-        imageUrl: draft.imageUrl,
-        publicId: draft.publicId,
-        language: draft.language,
-        storageKey: draft.storageKey ?? "",
-        fileName: draft.fileName ?? "",
-        fileSize: draft.fileSize ?? 0,
-        mimeType: draft.mimeType ?? "",
-      });
+      sendingRef.current = true;
+      try {
+        // One action for the whole batch: the server pays for auth, the chat
+        // ownership check and the insert once rather than once per note.
+        const result = await createNotes({
+          chatId: targetChatId,
+          notes: drafts.map((draft) => ({
+            type: draft.type,
+            content: draft.content,
+            imageUrl: draft.imageUrl,
+            publicId: draft.publicId,
+            language: draft.language,
+            storageKey: draft.storageKey ?? "",
+            fileName: draft.fileName ?? "",
+            fileSize: draft.fileSize ?? 0,
+            mimeType: draft.mimeType ?? "",
+          })),
+        });
 
-      if (result.error || !result.note) {
-        setNotes((prev) => prev.filter((n) => n._id !== tempId));
-        toast.error(result.error ?? "Couldn't save note");
-        return false;
+        if (result.error || !result.results) {
+          const rolledBack = new Set(tempIds);
+          setNotes((prev) => prev.filter((n) => !rolledBack.has(n._id)));
+          toast.error(result.error ?? "Couldn't save note");
+          return false;
+        }
+
+        // Per-item outcome: swap the ones that saved, drop the ones that didn't.
+        const saved = new Map<string, NoteItem>();
+        const rejected = new Set<string>();
+        const reasons: string[] = [];
+        result.results.forEach((entry, i) => {
+          if (entry.note) {
+            saved.set(tempIds[i], entry.note);
+          } else {
+            rejected.add(tempIds[i]);
+            if (entry.error) reasons.push(entry.error);
+          }
+        });
+
+        setNotes((prev) => {
+          const next: NoteItem[] = [];
+          // A refresh that overlapped this send may already have pulled the
+          // saved copies in, so the swap has to drop the duplicate rather than
+          // render the same note twice.
+          const seen = new Set<string>();
+          for (const note of prev) {
+            const replacement = saved.get(note._id);
+            if (!replacement && rejected.has(note._id)) continue;
+            const resolved = replacement ?? note;
+            if (seen.has(resolved._id)) continue;
+            seen.add(resolved._id);
+            next.push(resolved);
+          }
+          return next;
+        });
+
+        if (saved.size === 0) {
+          toast.error(reasons[0] ?? "Couldn't save note");
+          return false;
+        }
+
+        if (rejected.size > 0) {
+          toast.error(
+            rejected.size === 1
+              ? reasons[0] ?? "One note couldn't be saved"
+              : `${rejected.size} of ${drafts.length} notes couldn't be saved`
+          );
+        }
+
+        bumpChat(targetChatId, result.chatTitle);
+        return true;
+      } finally {
+        sendingRef.current = false;
+        sendSeqRef.current += 1;
       }
-
-      const saved = result.note;
-      setNotes((prev) => prev.map((n) => (n._id === tempId ? saved : n)));
-      bumpChat(chatId, result.chatTitle);
-      return true;
     },
     [activeChatId, bumpChat, scrollToBottom]
   );
@@ -306,6 +373,97 @@ export default function AppShell({
   }, []);
 
   const toggleSidebar = useCallback(() => setSidebarOpen((v) => !v), []);
+
+  // ---- Refresh --------------------------------------------------------------
+  const refreshingRef = useRef(false);
+
+  /**
+   * Refetches the chat list and the open chat's notes.
+   *
+   * Notes otherwise only arrive through an optimistic send or a chat switch, so
+   * anything added from another device stayed invisible until the page was
+   * reloaded. This is the cheap version of that reload: two scoped JSON requests
+   * in parallel, instead of re-running a whole dynamic render.
+   */
+  const refreshAll = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+
+    const chatId = wantedChatRef.current;
+    const wasNearBottom = isNearBottom();
+    const sendSeqBefore = sendSeqRef.current;
+
+    try {
+      const [freshChats, freshNotes] = await Promise.all([
+        fetch("/api/chats", { cache: "no-store" })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data: { chats?: ChatItem[] } | null) => data?.chats ?? null)
+          .catch(() => null),
+        chatId ? fetchNotes(chatId, true) : Promise.resolve(null),
+      ]);
+
+      // Reported per half: a failed chat list paired with a successful notes
+      // fetch used to end the spinner as though everything had updated.
+      if (!freshChats && (!chatId || !freshNotes)) {
+        toast.error("Couldn't refresh — check your connection");
+        return;
+      }
+      if (!freshChats) toast.error("Couldn't refresh the chat list");
+      if (chatId && !freshNotes) toast.error("Couldn't refresh this chat");
+
+      if (freshChats) {
+        setChats(freshChats);
+
+        // The open chat may have been deleted elsewhere, or there may now be a
+        // chat to open where there wasn't one before.
+        if (!chatId || !freshChats.some((c) => c._id === chatId)) {
+          if (chatId) notesCacheRef.current.delete(chatId);
+          if (freshChats[0]) {
+            showChat(freshChats[0]._id);
+          } else {
+            setActiveChatId(null);
+            wantedChatRef.current = null;
+            setNotes([]);
+            setNotesLoading(false);
+          }
+          return;
+        }
+      }
+
+      // Discard a response for a chat the user has navigated away from since.
+      if (!freshNotes || wantedChatRef.current !== chatId) return;
+
+      // A send that overlapped this request may have committed notes after the
+      // read, so applying this response would erase them from the list. The send
+      // already merges its own saved notes into local state, so leaving the list
+      // alone is both correct and cheaper than refetching.
+      if (sendingRef.current || sendSeqRef.current !== sendSeqBefore) return;
+
+      // Optimistic notes from a send that hasn't come back yet are carried over
+      // so the swap that follows it still finds them.
+      setNotes((prev) => {
+        const pending = prev.filter((n) => n.pending);
+        return pending.length > 0 ? [...freshNotes, ...pending] : freshNotes;
+      });
+      setNotesLoading(false);
+      if (wasNearBottom) {
+        requestAnimationFrame(() => scrollToBottom("smooth"));
+      }
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
+  }, [fetchNotes, isNearBottom, scrollToBottom, showChat]);
+
+  // The button lives in the navbar, which isn't an ancestor of this component.
+  useEffect(
+    () =>
+      onRefreshRequest(() => {
+        void refreshAll();
+      }),
+    [refreshAll]
+  );
 
   // ---- Search ---------------------------------------------------------------
   /** Scrolls a rendered note into view and flashes it, so the hit is obvious. */
@@ -467,7 +625,7 @@ export default function AppShell({
         <div className="composer-shell border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 pt-2.5 sm:px-6 sm:pt-4 pb-[calc(0.625rem+env(safe-area-inset-bottom,0px))] sm:pb-[calc(1rem+env(safe-area-inset-bottom,0px))] overflow-y-auto overscroll-none-y">
           <div className="max-w-3xl mx-auto">
             <NoteEditor
-              onSubmitNote={handleSubmitNote}
+              onSubmitNotes={handleSubmitNotes}
               onToggleSidebar={toggleSidebar}
               onOpenSearch={openSearch}
               sidebarOpen={sidebarOpen}

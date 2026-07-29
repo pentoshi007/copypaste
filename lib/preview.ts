@@ -52,6 +52,32 @@ export function isInlineViewable(mimeType: string, fileName: string): boolean {
 export const TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
 
 /**
+ * Types we refuse to store. These are only ever served as downloads from a
+ * private bucket, but there's no reason to host executables.
+ *
+ * This lives here — alongside the other classification rules — so the presign
+ * route and the composer apply exactly the same list. They used to be separate
+ * copies, which meant the client happily uploaded a file the server would then
+ * reject at presign time.
+ */
+const BLOCKED_TYPES = new Set([
+  "application/x-msdownload",
+  "application/x-msdos-program",
+  "application/x-ms-installer",
+  "application/vnd.microsoft.portable-executable",
+]);
+
+const BLOCKED_EXTENSIONS =
+  /\.(exe|msi|bat|cmd|com|scr|cpl|jar|app|dmg|pkg|deb|rpm|sh|ps1|vbs|lnk)$/i;
+
+export function isBlockedUpload(mimeType: string, fileName: string): boolean {
+  return (
+    BLOCKED_TYPES.has((mimeType || "").toLowerCase().trim()) ||
+    BLOCKED_EXTENSIONS.test(fileName)
+  );
+}
+
+/**
  * Office formats can't be rendered by a browser. Previewing them would mean
  * handing a signed URL to a third-party viewer (Microsoft/Google), which would
  * send private files off to someone else's servers — so they stay download-only.

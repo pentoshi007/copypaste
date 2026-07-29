@@ -9,6 +9,7 @@ import {
   presignPut,
   sanitizeFileName,
 } from "@/lib/r2";
+import { isBlockedUpload } from "@/lib/preview";
 
 /**
  * Issues a short-lived, single-object PUT URL so the browser can upload a file
@@ -20,20 +21,6 @@ import {
  */
 
 const PRESIGN_TTL_SECONDS = 900; // 15 minutes — enough for a large file on mobile
-
-/**
- * Types we refuse to store. These are only ever served as downloads from a
- * private bucket, but there's no reason to host executables.
- */
-const BLOCKED_TYPES = new Set([
-  "application/x-msdownload",
-  "application/x-msdos-program",
-  "application/x-ms-installer",
-  "application/vnd.microsoft.portable-executable",
-]);
-
-const BLOCKED_EXTENSIONS =
-  /\.(exe|msi|bat|cmd|com|scr|cpl|jar|app|dmg|pkg|deb|rpm|sh|ps1|vbs|lnk)$/i;
 
 export async function POST(request: Request) {
   const session = await auth();
@@ -51,8 +38,11 @@ export async function POST(request: Request) {
 
   // Presigning costs nothing (no R2 call), but each signed URL is a potential
   // write against the free-tier Class A allowance, so cap the burst rate.
+  //
+  // The allowance has to cover a whole multi-file send at once: one request per
+  // file, so a couple of back-to-back twenty-file batches must not trip it.
   const allowed = rateLimit("upload-url", session.user.id, {
-    maxAttempts: 40,
+    maxAttempts: 120,
     windowMs: 60_000,
   });
   if (!allowed) {
@@ -95,7 +85,7 @@ export async function POST(request: Request) {
       ? body.contentType.trim()
       : "application/octet-stream";
 
-  if (BLOCKED_TYPES.has(contentType) || BLOCKED_EXTENSIONS.test(fileName)) {
+  if (isBlockedUpload(contentType, fileName)) {
     return NextResponse.json(
       { error: "That file type isn't allowed" },
       { status: 400 }

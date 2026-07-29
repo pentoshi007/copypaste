@@ -1,8 +1,14 @@
 "use client";
 
-import { Moon, Sun, LogOut } from "lucide-react";
+import { Moon, RefreshCw, Sun, LogOut } from "lucide-react";
 import { useSyncExternalStore } from "react";
 import { logoutAction } from "@/actions/auth";
+import {
+  getRefreshing,
+  getRefreshingServerSnapshot,
+  requestRefresh,
+  subscribeRefreshing,
+} from "@/lib/refresh";
 import Logo from "./Logo";
 
 // --- Client-only theme detection (hydration-safe via useSyncExternalStore) ---
@@ -26,6 +32,14 @@ function getServerSnapshot() {
 
 export default function Header({ username }: { username: string }) {
   const isDark = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+
+  // AppShell does the actual refetching; this only fires the request and
+  // reflects whether one is in flight. See lib/refresh.ts for why.
+  const refreshing = useSyncExternalStore(
+    subscribeRefreshing,
+    getRefreshing,
+    getRefreshingServerSnapshot
+  );
 
   function toggleTheme() {
     const next = !isDark;
@@ -56,6 +70,19 @@ export default function Header({ username }: { username: string }) {
           <span className="hidden sm:inline text-sm text-slate-500 dark:text-slate-400">
             @{username}
           </span>
+
+          <button
+            onClick={requestRefresh}
+            disabled={refreshing}
+            aria-label="Refresh chats and notes"
+            aria-busy={refreshing}
+            title="Refresh"
+            className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-60 transition"
+          >
+            <RefreshCw
+              className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`}
+            />
+          </button>
 
           <button
             onClick={toggleTheme}
