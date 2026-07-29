@@ -14,7 +14,12 @@ const isProd = process.env.NODE_ENV === "production";
 const csp = [
   "default-src 'self'",
   "base-uri 'self'",
-  "object-src 'none'",
+  // Chrome renders PDFs through an internal plugin document, so an <iframe>
+  // pointing at a PDF is checked against object-src, not just frame-src.
+  // 'none' made the in-app PDF preview fail with "This content is blocked".
+  // Scoped to our own origin, blobs and the storage origin the redirect lands
+  // on — not a blanket allowance.
+  "object-src 'self' blob: https://*.r2.cloudflarestorage.com",
   // 'self' rather than 'none': the PDF preview frames our own /api/files route,
   // and 'none' would block that too. Third-party framing is still refused.
   "frame-ancestors 'self'",

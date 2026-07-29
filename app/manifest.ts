@@ -18,7 +18,12 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: "/",
     scope: "/",
     display: "standalone",
-    orientation: "any",
+    // `orientation` is deliberately omitted.
+    //
+    // Setting it — including to "any" — makes Chrome apply an explicit
+    // orientation lock, which overrides the device's own rotation lock. The
+    // installed app then rotates even when the user has rotation turned off.
+    // With the field absent no lock is applied at all, so the OS setting wins.
     background_color: "#0f172a",
     theme_color: "#0f172a",
     categories: ["productivity", "utilities"],

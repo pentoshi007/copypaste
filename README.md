@@ -18,7 +18,7 @@ Notes are organized into **chats** (like conversation threads). Each chat auto-t
   - **Video / audio** use the native players, also range-served.
   - **Text, code, CSV, logs** are read through a bounded `Range` request (first 512 KB) and rendered as escaped text — previewing a 50 MB log costs one small read.
   - **Word / Excel / PowerPoint** are download-only. Browsers can't render them, and the alternative is shipping a signed URL to Microsoft's or Google's viewer, which would send private files to a third party.
-- **Installable (PWA)** — web app manifest with maskable icons, a static-asset service worker, and safe-area handling so it behaves correctly in standalone mode.
+- **Installable (PWA)** — web app manifest with maskable icons, a static-asset service worker, and safe-area handling so it behaves correctly in standalone mode. The manifest deliberately omits `orientation`: setting it (even to `"any"`) makes Chrome apply an orientation lock that overrides the device's own rotation lock, so an installed app rotates even with rotation switched off.
 - **Cross-device sync** — MongoDB Atlas stores everything per-user. Log in on any device and your chats and notes are there.
 - **Opens at latest chat** — the most recently updated chat is selected on load.
 - **Input methods** — type, paste (the clipboard `paste` handler picks up images *and* files), drag-and-drop, or the attach button. Images route to Cloudinary and everything else to R2 automatically.
@@ -350,7 +350,17 @@ hostile page can't make a visitor's browser pull their own files. The signed URL
 redirects to lives for 2 minutes and is served `Cache-Control: private, no-store`.
 
 ### Security headers
-`next.config.ts` sets a Content Security Policy plus `X-Content-Type-Options`,
+Two directives are looser than they look like they should be, both to make the PDF
+preview work, and both scoped rather than opened up:
+
+- `object-src 'self' blob: https://*.r2.cloudflarestorage.com` — Chrome renders PDFs
+  through an internal plugin document, so an `<iframe>` pointing at a PDF is checked
+  against `object-src`, not just `frame-src`. With `'none'` the preview failed with
+  "This content is blocked."
+- `X-Frame-Options: SAMEORIGIN` and `frame-ancestors 'self'` — `DENY`/`'none'` also
+  refuse framing by our own pages, which would block the same preview.
+
+`next.config.ts` also sets `X-Content-Type-Options`,
 `Referrer-Policy`, `X-Frame-Options`, `Permissions-Policy`,
 `Strict-Transport-Security` and `Cross-Origin-Opener-Policy`. The CSP still needs
 `'unsafe-inline'` for scripts because the pre-paint theme script is inline and Next
