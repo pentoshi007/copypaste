@@ -199,6 +199,24 @@ the storage hostname would make it a stored-XSS vector on that origin, so text
 previews are read through `/api/files/[noteId]/text` instead, which returns JSON that
 the client renders as escaped text.
 
+> **Do not add headers to the upload without updating the CORS policy.** Every header
+> `/api/upload-url` returns is sent on the `PUT`, so it appears in the browser's
+> `Access-Control-Request-Headers` preflight. R2 rejects the whole preflight with a
+> bare `403` — no `Access-Control-Allow-Origin` at all — if even one header is absent
+> from `AllowedHeaders`, and the browser reports it only as a generic CORS failure.
+> To check a policy is live (no credentials needed):
+>
+> ```bash
+> curl -i -X OPTIONS \
+>   "https://<ACCOUNT_ID>.r2.cloudflarestorage.com/<BUCKET>/probe" \
+>   -H "Origin: https://your-origin" \
+>   -H "Access-Control-Request-Method: PUT" \
+>   -H "Access-Control-Request-Headers: content-type,content-disposition"
+> ```
+>
+> A `204` carrying `Access-Control-Allow-Origin` means the policy matches; a `403`
+> means it doesn't.
+
 > Files uploaded before this behaviour existed were all stored as `attachment`, so
 > they download instead of previewing. Re-upload them to get previews.
 

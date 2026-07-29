@@ -113,14 +113,18 @@ export async function POST(request: Request) {
         uploadUrl,
         fileName,
         // The client must send these verbatim so R2 stores them as metadata.
+        //
+        // IMPORTANT: every header listed here ends up in the browser's
+        // `Access-Control-Request-Headers` preflight, and R2 rejects the
+        // preflight outright (403, no CORS headers) if any of them is missing
+        // from the bucket's `AllowedHeaders`. Adding one here without also
+        // updating the bucket policy breaks all uploads. Keep this list minimal
+        // and in sync with the CORS policy documented in the README.
         headers: {
           "Content-Type": contentType,
           // inline for natively-viewable formats so they can be previewed
           // in-app; attachment for everything else.
           "Content-Disposition": contentDispositionFor(fileName, contentType),
-          // Objects are immutable (the key contains a random segment), so a long
-          // browser cache is safe and makes repeat previews instant.
-          "Cache-Control": "private, max-age=31536000, immutable",
         },
       },
       { headers: { "Cache-Control": "private, no-store" } }
