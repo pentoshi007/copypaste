@@ -23,12 +23,31 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ noteId: string }> }
 ) {
-  // Refuse downloads initiated by another site. Browsers set Sec-Fetch-Site and
-  // script can't forge it, so this blocks a hostile page from making a visitor's
-  // browser pull their files. Requests without the header (curl, old browsers)
-  // fall through — they still need a valid session cookie.
+  // Block cross-site *subresource* requests — a hostile page embedding this URL
+  // in an <img> or <iframe> to make a visitor's browser pull their own files.
+  //
+  // Top-level navigations are allowed from any initiator, because a legitimate
+  // one isn't always same-origin: when an installed PWA opens a link with
+  // target="_blank", Chrome hands it to the browser as a fresh context and
+  // reports Sec-Fetch-Site: cross-site. Gating on that alone returned 403 inside
+  // the installed app while the identical click worked in a browser tab.
+  //
+  // Same-origin requests of any destination stay allowed, since the in-app
+  // preview deliberately loads this route as an iframe/video/audio subresource.
+  //
+  // This is defence in depth rather than the actual control. What protects the
+  // file is: a valid session is required; the note is looked up scoped to the
+  // caller's userId, so only ever their own file is reachable; the route sends
+  // no CORS headers, so a cross-origin fetch cannot read the response; the
+  // session cookie is SameSite=Lax, so it isn't even sent on cross-site
+  // subresource requests (those get 401); and frame-ancestors 'self' stops other
+  // origins framing it.
   const fetchSite = request.headers.get("sec-fetch-site");
-  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+  const fetchDest = request.headers.get("sec-fetch-dest");
+  const sameOrigin =
+    !fetchSite || fetchSite === "same-origin" || fetchSite === "none";
+  const topLevelNavigation = fetchDest === "document";
+  if (!sameOrigin && !topLevelNavigation) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
