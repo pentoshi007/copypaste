@@ -252,6 +252,9 @@ export default function AppShell({
         publicId: draft.publicId,
         language: draft.language,
         createdAt: new Date().toISOString(),
+        fileName: draft.fileName ?? "",
+        fileSize: draft.fileSize ?? 0,
+        mimeType: draft.mimeType ?? "",
         pending: true,
       };
 
@@ -265,6 +268,10 @@ export default function AppShell({
         imageUrl: draft.imageUrl,
         publicId: draft.publicId,
         language: draft.language,
+        storageKey: draft.storageKey ?? "",
+        fileName: draft.fileName ?? "",
+        fileSize: draft.fileSize ?? 0,
+        mimeType: draft.mimeType ?? "",
       });
 
       if (result.error || !result.note) {

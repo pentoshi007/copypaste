@@ -6,6 +6,7 @@ import { auth } from "@/auth";
 import dbConnect from "@/lib/db";
 import Chat from "@/models/Chat";
 import Note from "@/models/Note";
+import { deleteObjects, getR2Config } from "@/lib/r2";
 import type { ChatItem } from "@/lib/types";
 
 // No `revalidatePath("/")` here — see the note in actions/notes.ts. The client
@@ -125,33 +126,51 @@ export async function deleteChat(
       return { error: "Chat not found" };
     }
 
-    // Collect image publicIds before the notes are gone (projection: publicId only)
-    const imageNotes = await Note.find(
-      { chatId, userId: session.user.id, publicId: { $ne: "" } },
-      { publicId: 1 }
+    // Collect attachment identifiers before the notes are gone.
+    const attachments = await Note.find(
+      {
+        chatId,
+        userId: session.user.id,
+        $or: [{ publicId: { $ne: "" } }, { storageKey: { $ne: "" } }],
+      },
+      { publicId: 1, storage: 1, storageKey: 1 }
     ).lean();
 
-    const publicIds = imageNotes
-      .map((n) => n.publicId)
-      .filter((id): id is string => Boolean(id));
+    const publicIds: string[] = [];
+    const objectKeys: string[] = [];
+    for (const note of attachments) {
+      if (note.storage === "r2" && note.storageKey) {
+        objectKeys.push(note.storageKey);
+      } else if (note.publicId) {
+        publicIds.push(note.publicId);
+      }
+    }
 
     // Delete the notes — this is what the user is waiting on.
     await Note.deleteMany({ chatId, userId: session.user.id });
 
-    // Cloudinary cleanup runs *after* the response is flushed, so deleting a
-    // chat full of images no longer blocks the UI on N remote API calls.
-    // `delete_resources` handles up to 100 ids per request.
-    if (publicIds.length > 0) {
+    // Blob cleanup runs *after* the response is flushed, so deleting a chat full
+    // of attachments no longer blocks the UI on N remote API calls.
+    if (publicIds.length > 0 || objectKeys.length > 0) {
       after(async () => {
-        try {
-          const cloudinary = (await import("cloudinary")).default;
-          for (let i = 0; i < publicIds.length; i += 100) {
-            await cloudinary.v2.api
-              .delete_resources(publicIds.slice(i, i + 100))
-              .catch(() => {});
+        if (objectKeys.length > 0) {
+          const config = getR2Config();
+          // DeleteObject is free on R2, so batching buys nothing but complexity.
+          if (config) await deleteObjects(config, objectKeys);
+        }
+
+        if (publicIds.length > 0) {
+          try {
+            const cloudinary = (await import("cloudinary")).default;
+            // delete_resources handles up to 100 ids per request.
+            for (let i = 0; i < publicIds.length; i += 100) {
+              await cloudinary.v2.api
+                .delete_resources(publicIds.slice(i, i + 100))
+                .catch(() => {});
+            }
+          } catch {
+            // non-fatal — Cloudinary env may not be configured in dev
           }
-        } catch {
-          // non-fatal — Cloudinary env may not be configured in dev
         }
       });
     }

@@ -10,10 +10,12 @@ import {
 import { useDropzone } from "react-dropzone";
 import type { NoteDraft, NoteType } from "@/lib/types";
 import {
-  uploadWithProgress,
+  isImageFile,
+  uploadFileToR2,
+  uploadImage,
   validateImageFile,
-  type UploadResult,
 } from "@/lib/upload";
+import { formatBytes } from "@/lib/format";
 import { toast } from "sonner";
 import {
   Type,
@@ -22,11 +24,12 @@ import {
   Send,
   Loader2,
   Paperclip,
+  File as FileIcon,
   X,
   MessagesSquare,
 } from "lucide-react";
 
-/** Text-ish types the user can pick explicitly. "image" is entered by attaching a file. */
+/** Types the user picks explicitly. "image"/"file" come from attaching something. */
 const TYPE_OPTIONS: { value: NoteType; label: string; icon: typeof Type }[] = [
   { value: "text", label: "Text", icon: Type },
   { value: "code", label: "Code", icon: Code2 },
@@ -57,6 +60,28 @@ const LANGUAGES = [
   "markdown",
 ];
 
+/**
+ * A pending attachment.
+ *
+ * Images go to Cloudinary (which resizes at delivery time); everything else goes
+ * to Cloudflare R2. `ready` flips once the bytes are stored and we have the
+ * identifier we need to save the note.
+ */
+type Attachment = {
+  kind: "image" | "file";
+  name: string;
+  size: number;
+  mimeType: string;
+  /** Local object URL — images only, for an instant preview. */
+  previewUrl: string;
+  ready: boolean;
+  // Cloudinary (images)
+  imageUrl: string;
+  publicId: string;
+  // R2 (files)
+  storageKey: string;
+};
+
 export default function NoteEditor({
   onSubmitNote,
   onToggleSidebar,
@@ -70,16 +95,14 @@ export default function NoteEditor({
   const [type, setType] = useState<NoteType>("text");
   const [content, setContent] = useState("");
   const [language, setLanguage] = useState("plaintext");
-  const [imageUrl, setImageUrl] = useState("");
-  const [publicId, setPublicId] = useState("");
-  const [localPreview, setLocalPreview] = useState("");
+  const [attachment, setAttachment] = useState<Attachment | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [progress, setProgress] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const captionRef = useRef<HTMLInputElement>(null);
-  // Object URLs must be revoked or they leak the whole image buffer.
+  // Object URLs must be revoked or they hold the whole file buffer in memory.
   const objectUrlRef = useRef<string>("");
   const abortRef = useRef<AbortController | null>(null);
 
@@ -110,26 +133,21 @@ export default function NoteEditor({
 
   useLayoutEffect(() => {
     resizeTextarea();
-  }, [content, type, resizeTextarea]);
+  }, [content, attachment, resizeTextarea]);
 
-  const clearImage = useCallback(() => {
+  const clearAttachment = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
     releaseObjectUrl();
-    setLocalPreview("");
-    setImageUrl("");
-    setPublicId("");
+    setAttachment(null);
     setProgress(0);
     setIsUploading(false);
-    setType("text");
   }, [releaseObjectUrl]);
 
   const reset = useCallback(() => {
     setContent("");
     releaseObjectUrl();
-    setLocalPreview("");
-    setImageUrl("");
-    setPublicId("");
+    setAttachment(null);
     setProgress(0);
     setLanguage("plaintext");
     setType("text");
@@ -148,23 +166,38 @@ export default function NoteEditor({
   };
 
   // --- Upload ---------------------------------------------------------------
-  const uploadFile = useCallback(
+  const attachFile = useCallback(
     async (file: File) => {
-      const invalid = validateImageFile(file);
-      if (invalid) {
-        toast.error(invalid);
+      const asImage = isImageFile(file);
+
+      if (asImage) {
+        const invalid = validateImageFile(file);
+        if (invalid) {
+          toast.error(invalid);
+          return;
+        }
+      } else if (file.size === 0) {
+        toast.error("That file is empty");
         return;
       }
 
-      // Show the local bitmap immediately — the user sees their image before a
-      // single byte has left the device.
+      // Show the attachment immediately — before a single byte has left the
+      // device — so sending feels responsive on slow connections.
       releaseObjectUrl();
-      const preview = URL.createObjectURL(file);
-      objectUrlRef.current = preview;
-      setLocalPreview(preview);
-      setImageUrl("");
-      setPublicId("");
-      setType("image");
+      const previewUrl = asImage ? URL.createObjectURL(file) : "";
+      if (previewUrl) objectUrlRef.current = previewUrl;
+
+      setAttachment({
+        kind: asImage ? "image" : "file",
+        name: file.name,
+        size: file.size,
+        mimeType: file.type || "application/octet-stream",
+        previewUrl,
+        ready: false,
+        imageUrl: "",
+        publicId: "",
+        storageKey: "",
+      });
       setProgress(0);
       setIsUploading(true);
 
@@ -172,59 +205,50 @@ export default function NoteEditor({
       abortRef.current = controller;
 
       try {
-        const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
-        const apiKey = process.env.NEXT_PUBLIC_CLOUDINARY_API_KEY;
-        if (!cloudName || !apiKey) {
-          toast.error("Image uploads aren't configured");
-          clearImage();
-          return;
+        if (asImage) {
+          const result = await uploadImage(file, setProgress, controller.signal);
+          setAttachment((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  ready: true,
+                  imageUrl: result.secure_url,
+                  publicId: result.public_id,
+                }
+              : prev
+          );
+        } else {
+          const result = await uploadFileToR2(
+            file,
+            setProgress,
+            controller.signal
+          );
+          setAttachment((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  ready: true,
+                  storageKey: result.storageKey,
+                  name: result.fileName,
+                  size: result.fileSize,
+                  mimeType: result.mimeType,
+                }
+              : prev
+          );
         }
 
-        const timestamp = Math.round(Date.now() / 1000);
-
-        const signRes = await fetch("/api/upload-sign", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          // Key must match the server's expected shape.
-          body: JSON.stringify({ paramsToSign: { timestamp } }),
-          signal: controller.signal,
-        });
-
-        if (!signRes.ok) {
-          toast.error("Upload authorization failed");
-          clearImage();
-          return;
-        }
-
-        const { signature } = (await signRes.json()) as { signature: string };
-
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("api_key", apiKey);
-        formData.append("timestamp", String(timestamp));
-        formData.append("signature", signature);
-
-        const data: UploadResult = await uploadWithProgress(
-          `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`,
-          formData,
-          setProgress,
-          controller.signal
-        );
-
-        setImageUrl(data.secure_url);
-        setPublicId(data.public_id);
         // Move focus to the caption so the next keystroke lands somewhere useful.
         requestAnimationFrame(() => captionRef.current?.focus());
       } catch (err) {
         if ((err as Error)?.name === "AbortError") return; // user cancelled
-        toast.error((err as Error)?.message || "Image upload failed");
-        clearImage();
+        toast.error((err as Error)?.message || "Upload failed");
+        clearAttachment();
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
         setIsUploading(false);
       }
     },
-    [clearImage, releaseObjectUrl]
+    [clearAttachment, releaseObjectUrl]
   );
 
   // Paste anywhere in the composer — including the caption field.
@@ -233,64 +257,81 @@ export default function NoteEditor({
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
-        if (item.kind === "file" && item.type.startsWith("image/")) {
+        if (item.kind === "file") {
           const file = item.getAsFile();
           if (!file) continue;
           e.preventDefault();
-          void uploadFile(file);
+          void attachFile(file);
           return;
         }
       }
     },
-    [uploadFile]
+    [attachFile]
   );
 
   const onDrop = useCallback(
     (acceptedFiles: File[]) => {
       const file = acceptedFiles[0];
-      if (file) void uploadFile(file);
+      if (file) void attachFile(file);
     },
-    [uploadFile]
+    [attachFile]
   );
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
-    accept: { "image/*": [] },
+    // Any file type — images route to Cloudinary, everything else to R2.
     multiple: false,
     noClick: true,
     noKeyboard: true,
-    maxSize: 10 * 1024 * 1024,
   });
 
   // --- Submit ---------------------------------------------------------------
-  const isImage = type === "image";
-  const canSend = isImage
-    ? Boolean(imageUrl) && !isUploading
+  const effectiveType: NoteType = attachment ? attachment.kind : type;
+  const hasAttachment = attachment !== null;
+  const canSend = hasAttachment
+    ? attachment.ready && !isUploading
     : content.trim().length > 0;
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (isSaving || isUploading) return;
 
-    if (isImage && !imageUrl) {
-      toast.error("Wait for the image to finish uploading");
+    if (attachment && !attachment.ready) {
+      toast.error("Wait for the upload to finish");
       return;
     }
-    if (!isImage && !content.trim()) return;
+    if (!attachment && !content.trim()) return;
 
-    // Note: the optimistic note uses `imageUrl` (already uploaded — `canSend`
-    // requires it), so the local object URL never leaves this component and
-    // `reset()` can safely revoke it.
-    const draft: NoteDraft = {
-      type,
-      content: isImage ? content : content.trim(),
-      imageUrl,
-      publicId,
-      language: type === "code" ? language : "",
-    };
+    const draft: NoteDraft = attachment
+      ? attachment.kind === "image"
+        ? {
+            type: "image",
+            content,
+            imageUrl: attachment.imageUrl,
+            publicId: attachment.publicId,
+            language: "",
+          }
+        : {
+            type: "file",
+            content,
+            imageUrl: "",
+            publicId: "",
+            language: "",
+            storageKey: attachment.storageKey,
+            fileName: attachment.name,
+            fileSize: attachment.size,
+            mimeType: attachment.mimeType,
+          }
+      : {
+          type,
+          content: content.trim(),
+          imageUrl: "",
+          publicId: "",
+          language: type === "code" ? language : "",
+        };
 
     setIsSaving(true);
-    const focusTarget = isImage ? captionRef.current : textareaRef.current;
+    const focusTarget = attachment ? captionRef.current : textareaRef.current;
     const hadFocus = document.activeElement === focusTarget;
     try {
       const ok = await onSubmitNote(draft);
@@ -312,7 +353,6 @@ export default function NoteEditor({
   };
 
   const busy = isSaving || isUploading;
-  const previewSrc = imageUrl || localPreview;
 
   return (
     <div {...getRootProps()} onPaste={handlePaste} className="relative">
@@ -321,7 +361,7 @@ export default function NoteEditor({
       {isDragActive && (
         <div className="absolute inset-0 z-10 rounded-xl border-2 border-dashed border-blue-500 bg-blue-50/95 dark:bg-blue-950/80 flex items-center justify-center pointer-events-none">
           <p className="text-blue-600 dark:text-blue-400 font-medium text-sm">
-            Drop image to upload
+            Drop a file to attach
           </p>
         </div>
       )}
@@ -348,12 +388,12 @@ export default function NoteEditor({
               key={value}
               type="button"
               onClick={() => {
-                if (isImage) clearImage();
+                if (hasAttachment) clearAttachment();
                 setType(value);
               }}
-              aria-pressed={type === value}
+              aria-pressed={effectiveType === value}
               className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${
-                type === value
+                effectiveType === value
                   ? "bg-blue-600 text-white"
                   : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
               }`}
@@ -367,18 +407,18 @@ export default function NoteEditor({
             type="button"
             onClick={() => open()}
             disabled={isUploading}
-            aria-label="Attach image"
+            aria-label="Attach a file"
             className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition disabled:opacity-50 ${
-              isImage
+              hasAttachment
                 ? "bg-blue-600 text-white"
                 : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
             }`}
           >
             <Paperclip className="w-4 h-4" />
-            Image
+            File
           </button>
 
-          {type === "code" && (
+          {effectiveType === "code" && (
             <select
               value={language}
               onChange={(e) => setLanguage(e.target.value)}
@@ -394,17 +434,21 @@ export default function NoteEditor({
           )}
         </div>
 
-        {/* Attachment chip — compact (fixed 48px) so image mode barely changes
-            the composer's height. */}
-        {isImage && previewSrc && (
+        {/* Attachment chip — fixed 48px tall so attaching something barely
+            changes the composer's height. */}
+        {attachment && (
           <div className="flex items-center gap-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 p-2">
-            <div className="relative w-12 h-12 shrink-0 rounded-md overflow-hidden bg-slate-200 dark:bg-slate-700">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={previewSrc}
-                alt="Attachment preview"
-                className="w-full h-full object-cover"
-              />
+            <div className="relative w-12 h-12 shrink-0 rounded-md overflow-hidden bg-slate-200 dark:bg-slate-700 flex items-center justify-center">
+              {attachment.previewUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={attachment.previewUrl}
+                  alt=""
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <FileIcon className="w-5 h-5 text-slate-500 dark:text-slate-400" />
+              )}
               {isUploading && (
                 <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
                   <Loader2 className="w-4 h-4 text-white animate-spin" />
@@ -413,12 +457,18 @@ export default function NoteEditor({
             </div>
 
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium text-slate-600 dark:text-slate-300">
+              <p
+                className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate"
+                title={attachment.name}
+              >
+                {attachment.name || "Attachment"}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
                 {isUploading
                   ? `Uploading… ${progress}%`
-                  : imageUrl
-                  ? "Ready to send"
-                  : "Attachment"}
+                  : attachment.ready
+                  ? `${formatBytes(attachment.size)} · ready`
+                  : formatBytes(attachment.size)}
               </p>
               {isUploading && (
                 <div
@@ -439,8 +489,8 @@ export default function NoteEditor({
 
             <button
               type="button"
-              onClick={clearImage}
-              aria-label={isUploading ? "Cancel upload" : "Remove image"}
+              onClick={clearAttachment}
+              aria-label={isUploading ? "Cancel upload" : "Remove attachment"}
               className="shrink-0 p-1.5 rounded-md text-slate-500 hover:text-red-500 hover:bg-white dark:hover:bg-slate-700 transition"
             >
               <X className="w-4 h-4" />
@@ -451,7 +501,7 @@ export default function NoteEditor({
         {/* Input + send share one row, so the send button is always on screen
             regardless of attachments or how tall the input grows. */}
         <div className="flex items-end gap-2">
-          {isImage ? (
+          {hasAttachment ? (
             <input
               ref={captionRef}
               type="text"
@@ -501,7 +551,7 @@ export default function NoteEditor({
         </div>
 
         <p className="hidden sm:block text-xs text-slate-400">
-          ⌘/Ctrl + Enter to send · paste or drag an image to attach
+          ⌘/Ctrl + Enter to send · paste or drag a file to attach
         </p>
       </form>
     </div>

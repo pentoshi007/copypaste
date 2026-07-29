@@ -14,7 +14,7 @@ const noteSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["text", "code", "link", "image"],
+      enum: ["text", "code", "link", "image", "file"],
       required: true,
     },
     content: {
@@ -25,7 +25,35 @@ const noteSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    /** Cloudinary public_id — image notes only. */
     publicId: {
+      type: String,
+      default: "",
+    },
+    /**
+     * Which backend holds the attachment, so deletes go to the right place.
+     * Image notes use Cloudinary; `file` notes use R2.
+     */
+    storage: {
+      type: String,
+      enum: ["cloudinary", "r2"],
+      default: "cloudinary",
+    },
+    /** R2 object key — `file` notes only. Never exposed to the client. */
+    storageKey: {
+      type: String,
+      default: "",
+    },
+    /** Original filename, shown in the UI and restored on download. */
+    fileName: {
+      type: String,
+      default: "",
+    },
+    fileSize: {
+      type: Number,
+      default: 0,
+    },
+    mimeType: {
       type: String,
       default: "",
     },

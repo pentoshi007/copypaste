@@ -6,6 +6,14 @@ import { auth } from "@/auth";
 import dbConnect from "@/lib/db";
 import Note from "@/models/Note";
 import Chat from "@/models/Chat";
+import {
+  MAX_FILE_BYTES,
+  deleteObjects,
+  getR2Config,
+  headObject,
+  isOwnedFileKey,
+  sanitizeFileName,
+} from "@/lib/r2";
 import type { NoteItem, NoteType } from "@/lib/types";
 
 /*
@@ -21,11 +29,17 @@ import type { NoteItem, NoteType } from "@/lib/types";
 
 const createNoteSchema = z.object({
   chatId: z.string().length(24).regex(/^[a-f0-9]+$/i), // MongoDB ObjectId
-  type: z.enum(["text", "code", "link", "image"]),
+  type: z.enum(["text", "code", "link", "image", "file"]),
   content: z.string().max(10000, "Content too long (max 10000 chars)"),
   imageUrl: z.string().max(2048).optional().default(""),
   publicId: z.string().max(256).optional().default(""),
   language: z.string().max(50).optional().default(""),
+  // File attachments. `storageKey` is verified against the caller's namespace
+  // below; fileSize/mimeType are re-read from R2 rather than trusted.
+  storageKey: z.string().max(512).optional().default(""),
+  fileName: z.string().max(255).optional().default(""),
+  fileSize: z.number().int().nonnegative().optional().default(0),
+  mimeType: z.string().max(255).optional().default(""),
 });
 
 export type CreateNoteResult = {
@@ -35,8 +49,11 @@ export type CreateNoteResult = {
 };
 
 // Fields needed when serializing a note for the client
+// Fields needed when serializing a note back to the client.
+// `storageKey` is intentionally excluded — the client downloads through
+// /api/files/[noteId] and never needs the raw R2 key.
 const NOTE_PROJECTION =
-  "_id chatId type content imageUrl publicId language createdAt";
+  "_id chatId type content imageUrl publicId language createdAt fileName fileSize mimeType";
 
 export async function createNote(
   input: z.infer<typeof createNoteSchema>
@@ -52,6 +69,8 @@ export async function createNote(
   }
 
   const { chatId, type, content, imageUrl, publicId, language } = parsed.data;
+  let { fileName, fileSize, mimeType } = parsed.data;
+  const { storageKey } = parsed.data;
 
   // Link type: validate URL scheme (http/https only — blocks javascript:/data:)
   if (type === "link") {
@@ -73,9 +92,58 @@ export async function createNote(
     }
   }
 
-  // Image type: require imageUrl + publicId
-  if (type === "image" && (!imageUrl || !publicId)) {
-    return { error: "Image upload incomplete" };
+  // --- Attachment ownership checks ----------------------------------------
+  // The browser uploads directly to Cloudinary/R2, so the identifiers it sends
+  // back are untrusted input. Both branches below confirm the asset lives in
+  // this user's namespace; without that, a user could claim someone else's
+  // asset and then read or delete it through their own note.
+
+  if (type === "image") {
+    if (!imageUrl || !publicId) {
+      return { error: "Image upload incomplete" };
+    }
+    if (!isOwnedCloudinaryId(publicId, session.user.id)) {
+      return { error: "Invalid image reference" };
+    }
+    if (!isCloudinaryDeliveryUrl(imageUrl)) {
+      return { error: "Invalid image URL" };
+    }
+  }
+
+  if (type === "file") {
+    const config = getR2Config();
+    if (!config) {
+      return { error: "File storage isn't configured" };
+    }
+    if (!isOwnedFileKey(storageKey, session.user.id)) {
+      return { error: "Invalid file reference" };
+    }
+
+    // Confirm the object really exists and record its true size/type instead of
+    // the client-reported values. This also stops a note being created that
+    // points at an object that was never uploaded.
+    const metadata = await headObject(config, storageKey);
+    if (!metadata) {
+      return { error: "Upload didn't complete — please try again" };
+    }
+
+    // The presigned PUT doesn't constrain body length, so the size declared at
+    // presign time is advisory. This is the real check — and the oversized
+    // object is removed rather than left behind eating the storage quota.
+    if (metadata.size > MAX_FILE_BYTES) {
+      after(async () => {
+        await deleteObjects(config, [storageKey]);
+      });
+      return {
+        error: `File is too large (max ${Math.floor(
+          MAX_FILE_BYTES / (1024 * 1024)
+        )}MB)`,
+      };
+    }
+
+    fileSize = metadata.size;
+    mimeType = metadata.contentType;
+    fileName = sanitizeFileName(fileName || storageKey.split("/").pop() || "file");
   }
 
   try {
@@ -100,8 +168,13 @@ export async function createNote(
       chatId,
       type,
       content,
-      imageUrl,
-      publicId,
+      imageUrl: type === "image" ? imageUrl : "",
+      publicId: type === "image" ? publicId : "",
+      storage: type === "file" ? "r2" : "cloudinary",
+      storageKey: type === "file" ? storageKey : "",
+      fileName: type === "file" ? fileName : "",
+      fileSize: type === "file" ? fileSize : 0,
+      mimeType: type === "file" ? mimeType : "",
       language,
     });
 
@@ -109,7 +182,7 @@ export async function createNote(
     // this extra write; every later note is two round trips total.
     let chatTitle: string = chat.title;
     if (chatTitle === "New Chat") {
-      chatTitle = deriveChatTitle(type, content);
+      chatTitle = deriveChatTitle(type, content, fileName);
       if (chatTitle !== chat.title) {
         await Chat.updateOne(
           { _id: chatId, userId: session.user.id },
@@ -127,6 +200,9 @@ export async function createNote(
       publicId: doc.publicId ?? "",
       language: doc.language ?? "",
       createdAt: serializeDate(doc.createdAt),
+      fileName: doc.fileName ?? "",
+      fileSize: doc.fileSize ?? 0,
+      mimeType: doc.mimeType ?? "",
     };
 
     return { note, chatTitle };
@@ -213,6 +289,9 @@ export async function updateNote(
       publicId: updated.publicId ?? "",
       language: updated.language ?? "",
       createdAt: serializeDate(updated.createdAt),
+      fileName: updated.fileName ?? "",
+      fileSize: updated.fileSize ?? 0,
+      mimeType: updated.mimeType ?? "",
     };
 
     return { note };
@@ -246,17 +325,23 @@ export async function deleteNote(
     // to collapse fetch + delete into a single atomic operation
     const note = await Note.findOneAndDelete(
       { _id: noteId, userId: session.user.id },
-      { select: "publicId" }
+      { select: "publicId storage storageKey" }
     ).lean();
 
     if (!note) {
       return { error: "Note not found" };
     }
 
-    // Cloudinary cleanup runs after the response is flushed. A bare
-    // fire-and-forget promise can be killed when the serverless invocation
-    // ends; `after()` keeps the function alive just long enough.
-    if (note.publicId) {
+    // Blob cleanup runs after the response is flushed. A bare fire-and-forget
+    // promise can be killed when the serverless invocation ends; `after()` keeps
+    // the function alive just long enough.
+    if (note.storage === "r2" && note.storageKey) {
+      const key = note.storageKey;
+      after(async () => {
+        const config = getR2Config();
+        if (config) await deleteObjects(config, [key]);
+      });
+    } else if (note.publicId) {
       const publicId = note.publicId;
       after(async () => {
         try {
@@ -274,10 +359,39 @@ export async function deleteNote(
   }
 }
 
+/**
+ * Whether a Cloudinary public_id sits in this user's namespace.
+ *
+ * /api/upload-sign always generates ids as `u/<userId>/<random>`, so anything
+ * outside that prefix wasn't issued to this caller. This is what prevents a user
+ * from deleting (or claiming) another user's image by submitting its public_id.
+ */
+function isOwnedCloudinaryId(publicId: string, userId: string): boolean {
+  if (!publicId || publicId.includes("..")) return false;
+  return publicId.startsWith(`u/${userId}/`);
+}
+
+/** Only accept Cloudinary's own delivery host, over TLS. */
+function isCloudinaryDeliveryUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" && parsed.hostname === "res.cloudinary.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Names a brand-new chat after its first note. */
-function deriveChatTitle(type: NoteType, content: string): string {
+function deriveChatTitle(
+  type: NoteType,
+  content: string,
+  fileName = ""
+): string {
   const trimmed = content.trim();
   if (type === "image") return trimmed || "Image";
+  if (type === "file") return trimmed || fileName || "File";
   if (!trimmed) return "New Chat";
   return trimmed.length > 50 ? `${trimmed.slice(0, 47)}...` : trimmed;
 }

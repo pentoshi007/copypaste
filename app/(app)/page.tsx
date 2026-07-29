@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import dbConnect from "@/lib/db";
 import Note from "@/models/Note";
@@ -16,10 +17,16 @@ import type { NoteItem } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  // The session decode and the Mongo handshake are independent, so don't pay
-  // for them one after the other.
-  const [session] = await Promise.all([getSession(), dbConnect()]);
-  const userId = session!.user.id;
+  // Middleware and the layout both gate this route, but don't rely on a
+  // non-null assertion for an authorization guarantee — if either ever stops
+  // matching this path, this must still fail closed.
+  const session = await getSession();
+  if (!session?.user?.id) {
+    redirect("/login");
+  }
+  const userId = session.user.id;
+
+  await dbConnect();
 
   // Chats for this user, most recently active first.
   // Projection + .lean() skip Mongoose document hydration; the compound index

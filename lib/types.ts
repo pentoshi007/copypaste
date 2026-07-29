@@ -1,4 +1,4 @@
-export type NoteType = "text" | "code" | "link" | "image";
+export type NoteType = "text" | "code" | "link" | "image" | "file";
 
 export interface NoteItem {
   _id: string;
@@ -9,6 +9,10 @@ export interface NoteItem {
   publicId: string;
   language: string;
   createdAt: string; // ISO string for client serialization
+  /** File attachments (type "file"). */
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
   /**
    * Client-only: true while an optimistically-inserted note is still being
    * persisted. Never set by the server.
@@ -30,4 +34,9 @@ export interface NoteDraft {
   imageUrl: string;
   publicId: string;
   language: string;
+  /** Set for type "file": the R2 object key returned by /api/upload-url. */
+  storageKey?: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
 }

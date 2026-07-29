@@ -5,6 +5,7 @@ import TextBlock from "./TextBlock";
 import CodeBlock from "./CodeBlock";
 import LinkBlock from "./LinkBlock";
 import ImageBlock from "./ImageBlock";
+import FileBlock from "./FileBlock";
 import { Trash2, Loader2, Pencil, Check, X } from "lucide-react";
 import { memo, useState, useTransition } from "react";
 import { deleteNote, updateNote } from "@/actions/notes";
@@ -92,8 +93,10 @@ function NoteView({
     setIsEditing(true);
   };
 
-  // Images can't be edited inline (would need re-upload)
-  const canEdit = note.type !== "image" && !isPendingNote;
+  // Attachments can't be edited inline (would need a re-upload). Their caption
+  // lives in `content`, but editing that alone isn't wired up yet.
+  const isAttachment = note.type === "image" || note.type === "file";
+  const canEdit = !isAttachment && !isPendingNote;
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -223,6 +226,16 @@ function NoteView({
               {note.type === "link" && <LinkBlock url={note.content} />}
               {note.type === "image" && (
                 <ImageBlock imageUrl={note.imageUrl} caption={note.content} />
+              )}
+              {note.type === "file" && (
+                <FileBlock
+                  noteId={note._id}
+                  fileName={note.fileName ?? ""}
+                  fileSize={note.fileSize ?? 0}
+                  mimeType={note.mimeType ?? ""}
+                  caption={note.content}
+                  pending={isPendingNote}
+                />
               )}
             </>
           )}

@@ -7,15 +7,16 @@ Notes are organized into **chats** (like conversation threads). Each chat auto-t
 ## Features
 
 - **Chat-based organization** — Notes live inside chats. Create, rename, and delete chats. Each chat auto-titles from its first note's content.
-- **Four note types** with type-specific actions:
+- **Five note types** with type-specific actions:
   - **Text** — copy to clipboard with one tap.
   - **Code** — syntax-highlighted (Prism) with a copy-block button and language label.
   - **Link** — copy URL or open in a new tab (`rel="noopener noreferrer"`). Only `http`/`https` URLs accepted — `javascript:` and `data:` schemes are rejected by Zod validation.
-  - **Image** — upload to Cloudinary, copy-to-clipboard, download, and view full-size. Thumbnails use on-the-fly Cloudinary transforms (`f_auto,q_auto,w_400`).
+  - **Image** — upload to Cloudinary, copy-to-clipboard, download, and view full-size. Thumbnails use on-the-fly Cloudinary transforms (`c_limit,w_520,f_auto,q_auto`).
+  - **File** — any non-image file (documents, archives, audio, video) stored in a **private** Cloudflare R2 bucket. Uploaded straight from the browser with a presigned PUT and progress bar; downloaded through an ownership-checked redirect that preserves the original filename.
 - **Cross-device sync** — MongoDB Atlas stores everything per-user. Log in on any device and your chats and notes are there.
 - **Opens at latest chat** — the most recently updated chat is selected on load.
-- **Input methods** — type, paste (clipboard `paste` event auto-detects images), drag-and-drop files, or use the Cloudinary upload widget.
-- **Per-note delete** within a chat; **per-chat delete** removes the chat and all its notes (with best-effort Cloudinary asset cleanup).
+- **Input methods** — type, paste (the clipboard `paste` handler picks up images *and* files), drag-and-drop, or the attach button. Images route to Cloudinary and everything else to R2 automatically.
+- **Per-note delete** within a chat; **per-chat delete** removes the chat and all its notes, cleaning up both Cloudinary assets and R2 objects after the response is flushed.
 - **Responsive** — split-pane on desktop (chat list | notes + editor), stacked on mobile.
 - **Dark mode** — Tailwind `class` strategy, toggle persisted to `localStorage`.
 - **Keyboard shortcuts** — `Ctrl/Cmd+Enter` to save a note.
@@ -112,11 +113,88 @@ Click "Sign up", choose a username (3–20 chars) and password (8+ chars), and y
 |----------|----------|---------|-------------|
 | `MONGODB_URI` | ✅ | No | MongoDB Atlas connection string |
 | `AUTH_SECRET` | ✅ | No | JWT signing secret (`openssl rand -base64 32`) |
-| `CLOUDINARY_CLOUD_NAME` | ✅ | No | Cloudinary cloud name (server-side config) |
-| `CLOUDINARY_API_KEY` | ✅ | No | Cloudinary API key (server-side only) |
-| `CLOUDINARY_API_SECRET` | ✅ | No | Cloudinary API secret (server-side only — never in client bundle) |
-| `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME` | ✅ | Yes | Cloudinary cloud name (client-side upload widget) |
-| `NEXT_PUBLIC_CLOUDINARY_API_KEY` | ✅ | Yes | Cloudinary API key (client-side upload widget — not secret) |
+| `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME` | ✅ | Yes | Cloudinary cloud name — used to build image delivery URLs |
+| `CLOUDINARY_API_KEY` | ✅ | No | Cloudinary API key (returned to the client only as part of a signed upload) |
+| `CLOUDINARY_API_SECRET` | ✅ | No | Cloudinary API secret (server-side only — never in the client bundle) |
+| `R2_ACCOUNT_ID` | ✅ | No | Cloudflare account ID, from the bucket's S3 API endpoint |
+| `R2_BUCKET` | ✅ | No | R2 bucket name (`copypaste`) |
+| `R2_ACCESS_KEY_ID` | ✅ | No | R2 API token access key ID |
+| `R2_SECRET_ACCESS_KEY` | ✅ | No | R2 API token secret access key |
+| `R2_MAX_FILE_BYTES` | — | No | Max upload size in bytes. Defaults to `104857600` (100MB) |
+
+There is deliberately **no** `NEXT_PUBLIC_CLOUDINARY_API_KEY` and no public R2 URL: the
+browser receives the Cloudinary API key only inside a signed-upload response, and R2
+objects are never exposed on a public hostname.
+
+## Cloudflare R2 Setup
+
+Files (everything that isn't an image) live in a **private** R2 bucket. Three things
+are required, and one common step is deliberately skipped.
+
+### 1. Create an API token
+
+R2 → **API** → **Manage API tokens** → **Create Account API token**
+
+- Permission: **Object Read & Write**
+- Scope it to the `copypaste` bucket only (not "all buckets")
+
+Copy the **Access Key ID** and **Secret Access Key** into `R2_ACCESS_KEY_ID` and
+`R2_SECRET_ACCESS_KEY`. The secret is shown once.
+
+### 2. Add a CORS policy
+
+Bucket → **Settings** → **CORS Policy** → **Add CORS policy**. Without this the
+browser's preflight fails and uploads are blocked, even though the presigned URL
+itself is valid.
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "http://localhost:3000",
+      "https://your-app.vercel.app"
+    ],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["content-type", "content-disposition"],
+    "ExposeHeaders": ["etag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Replace `https://your-app.vercel.app` with your real deployed origin. Only `PUT` is
+needed — downloads don't go through CORS (see below).
+
+### 3. Leave public access disabled
+
+Do **not** enable the Public Development URL (`r2.dev`) or attach a custom domain.
+The bucket should stay private:
+
+- **Upload** — the browser asks `/api/upload-url` (auth-gated) for a presigned `PUT`
+  valid for 15 minutes, then sends the bytes directly to R2. Nothing proxies through
+  the app server, so uploads cost no app bandwidth.
+- **Download** — the browser hits `/api/files/[noteId]`, which verifies the note
+  belongs to the logged-in user and then `302`s to a presigned `GET` valid for 2
+  minutes. Because that's a top-level navigation, no CORS configuration is involved.
+
+`Content-Disposition: attachment; filename="…"` is written onto the object at upload
+time, so downloads keep their original name. R2 does **not** support the
+`response-content-disposition` query override on `GetObject`, which is why it has to
+be set on the way in.
+
+### Free tier
+
+R2's free allowance is 10 GB-month of storage, 1 million Class A operations (writes)
+and 10 million Class B operations (reads) per month, with **no egress charges**.
+`DeleteObject` is free. One upload costs 1 Class A op; one download costs 1 Class B
+op plus 1 for the ownership `HEAD` performed when the note is created. At those rates
+the operation limits are effectively unreachable for personal use — storage is the
+only meaningful constraint.
+
+Sources: [R2 pricing](https://developers.cloudflare.com/r2/pricing/),
+[R2 public buckets](https://developers.cloudflare.com/r2/buckets/public-buckets/),
+[R2 CORS](https://developers.cloudflare.com/r2/buckets/cors/).
+Content was rephrased for compliance with licensing restrictions.
 
 ## Project Structure
 
@@ -192,18 +270,66 @@ CopyPaste is built security-first. The core invariant: **a user can only ever re
 - Links are validated as URLs with scheme allowlist (`http`/`https` only) — `javascript:` and `data:` URLs are rejected by Zod and never rendered as `href`.
 
 ### Signed uploads
-- Image uploads go through Cloudinary's **signed upload** flow. The client requests a signature from `/api/upload-sign`, which:
-  - Returns `401` if no valid session — no anonymous uploads.
-  - Signs upload params server-side using `cloudinary.utils.api_sign_request` with the API secret.
-- The Cloudinary API **secret** never reaches the client bundle.
+Both upload paths are authorized server-side, and in both cases the **server chooses
+the destination** — the client only supplies bytes.
+
+- **Images → Cloudinary.** `/api/upload-sign` returns `401` without a session, then
+  generates the `public_id` itself as `u/<userId>/<random>` and signs only the
+  parameters it generated.
+
+  This endpoint must never sign caller-supplied parameters. An earlier version
+  signed whatever `paramsToSign` object it was handed, which made it a general
+  signing oracle: a logged-in user could request a signature for
+  `public_id=<another user's asset>` with `overwrite=true` and replace someone
+  else's image, or attach arbitrary eager transformations. Uploads also target
+  `/image/upload` rather than `/auto/upload`, so Cloudinary rejects non-images.
+
+- **Files → R2.** `/api/upload-url` picks the object key as `f/<userId>/<random>/<name>`,
+  enforces the size cap, and returns a 15-minute presigned `PUT`.
+
+- The Cloudinary API **secret** and the R2 **secret access key** never reach the client.
+
+### Attachment ownership
+Because the browser uploads directly to storage, the identifiers it sends back when
+creating a note are untrusted input. `createNote` verifies every one of them:
+
+- A Cloudinary `publicId` must start with `u/<userId>/`, and `imageUrl` must be an
+  `https` URL on `res.cloudinary.com`. Without the prefix check, a user could submit
+  another user's `public_id` and destroy their image by deleting their own note.
+- An R2 `storageKey` must start with `f/<userId>/`, contain no `..` or `//`, and the
+  object must actually exist — verified with a `HEAD`, which also supplies the real
+  size and content type instead of the client-reported values. Without this, a user
+  could claim `f/<victimId>/…` as their own note and read it through the
+  ownership-checked download route.
+- The presigned `PUT` doesn't constrain body length, so the size declared at presign
+  time is advisory. The `HEAD` is the real check, and an oversized object is deleted
+  rather than left consuming the storage quota.
+
+### File downloads
+`/api/files/[noteId]` requires a session, looks the note up scoped by `userId`, and
+rejects requests whose `Sec-Fetch-Site` indicates a cross-site initiator — so a
+hostile page can't make a visitor's browser pull their own files. The signed URL it
+redirects to lives for 2 minutes and is served `Cache-Control: private, no-store`.
+
+### Security headers
+`next.config.ts` sets a Content Security Policy plus `X-Content-Type-Options`,
+`Referrer-Policy`, `X-Frame-Options`, `Permissions-Policy`,
+`Strict-Transport-Security` and `Cross-Origin-Opener-Policy`. The CSP still needs
+`'unsafe-inline'` for scripts because the pre-paint theme script is inline and Next
+emits its own inline bootstrap; moving to nonces would mean generating the policy per
+request in middleware. Even so it blocks externally-hosted scripts, framing, plugins,
+and form submissions to other origins.
 
 ### Rate limiting
-- Login and signup server actions use an in-memory rate limiter (per-IP + per-username, 5 attempts per 15 seconds) to blunt brute-force and signup flooding.
-- This is a **dev-tier** limiter (in-memory, per-instance). For production, upgrade to **Upstash Redis** or **Vercel KV** for distributed rate limiting that survives multi-instance deployments.
+- Login and signup: per-IP + per-username, 5 attempts per 15 seconds.
+- Upload authorization (`/api/upload-url`, `/api/upload-sign`): per-user, 40 per minute — a cap on how fast the free-tier write allowance can be burned.
+- Client IP resolution prefers platform headers (`x-vercel-forwarded-for`, `cf-connecting-ip`, `x-real-ip`) over `x-forwarded-for`, which a caller can forge to get a fresh bucket per request. The per-username bucket is the backstop, since no header can change that.
+- **Known limitation:** the limiter is in-memory and therefore per-instance, so on a multi-instance deployment the effective limit is multiplied by the instance count. For real brute-force resistance, move it to **Upstash Redis** or **Vercel KV**.
 
 ### Secrets & client bundle
-- Only `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME` and `NEXT_PUBLIC_CLOUDINARY_API_KEY` are public (the API key is not secret — only the API secret is).
-- `MONGODB_URI`, `AUTH_SECRET`, `CLOUDINARY_API_SECRET` stay server-side.
+- `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME` is the only public value.
+- `MONGODB_URI`, `AUTH_SECRET`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` all stay server-side.
+- `storageKey` is excluded from every note projection sent to the client — downloads go through `/api/files/[noteId]`, so the raw R2 key is never exposed.
 - `.env*.local` is in `.gitignore`.
 
 ## Deployment

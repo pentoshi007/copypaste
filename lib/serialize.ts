@@ -8,6 +8,8 @@ import type { ChatItem, NoteItem, NoteType } from "@/lib/types";
  * end up holding two differently-shaped versions of the same note.
  */
 
+// `storageKey` is deliberately absent: the client downloads through
+// /api/files/[noteId], so it never needs the raw R2 key.
 export const NOTE_PROJECTION = {
   _id: 1,
   chatId: 1,
@@ -17,6 +19,9 @@ export const NOTE_PROJECTION = {
   publicId: 1,
   language: 1,
   createdAt: 1,
+  fileName: 1,
+  fileSize: 1,
+  mimeType: 1,
 } as const;
 
 export const CHAT_PROJECTION = {
@@ -41,6 +46,9 @@ type RawNote = {
   publicId?: string | null;
   language?: string | null;
   createdAt?: unknown;
+  fileName?: string | null;
+  fileSize?: number | null;
+  mimeType?: string | null;
 };
 
 type RawChat = {
@@ -66,6 +74,9 @@ export function serializeNote(n: RawNote): NoteItem {
     publicId: n.publicId ?? "",
     language: n.language ?? "",
     createdAt: serializeDate(n.createdAt),
+    fileName: n.fileName ?? "",
+    fileSize: n.fileSize ?? 0,
+    mimeType: n.mimeType ?? "",
   };
 }
 
