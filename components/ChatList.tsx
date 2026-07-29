@@ -11,6 +11,7 @@ import {
   Pencil,
   Trash2,
   Check,
+  Search,
   X,
   Loader2,
 } from "lucide-react";
@@ -23,6 +24,7 @@ export default function ChatList({
   onChatCreated,
   onChatDeleted,
   onChatRenamed,
+  onOpenSearch,
 }: {
   chats: ChatItem[];
   activeChatId: string | null;
@@ -32,6 +34,7 @@ export default function ChatList({
   onChatCreated: (chat: ChatItem) => void;
   onChatDeleted: (id: string) => void;
   onChatRenamed: (id: string, title: string) => void;
+  onOpenSearch?: () => void;
 }) {
   const [isCreating, setIsCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -84,8 +87,22 @@ export default function ChatList({
 
   return (
     <div className="h-full flex flex-col">
-      {/* Header with New Chat button */}
-      <div className="px-3 py-3 border-b border-slate-200 dark:border-slate-800">
+      {/* Header with search + New Chat */}
+      <div className="px-3 py-3 border-b border-slate-200 dark:border-slate-800 space-y-2">
+        {onOpenSearch && (
+          <button
+            onClick={onOpenSearch}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 text-sm transition"
+          >
+            <Search className="w-4 h-4 shrink-0" />
+            <span className="flex-1 text-left">Search notes</span>
+            {/* Hint the shortcut only where a physical keyboard is likely. */}
+            <kbd className="hidden lg:inline text-[10px] font-sans px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-600">
+              ⌘K
+            </kbd>
+          </button>
+        )}
+
         <button
           onClick={handleCreate}
           disabled={isCreating}

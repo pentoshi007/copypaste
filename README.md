@@ -19,6 +19,7 @@ Notes are organized into **chats** (like conversation threads). Each chat auto-t
   - **Text, code, CSV, logs** are read through a bounded `Range` request (first 512 KB) and rendered as escaped text — previewing a 50 MB log costs one small read.
   - **Word / Excel / PowerPoint** are download-only. Browsers can't render them, and the alternative is shipping a signed URL to Microsoft's or Google's viewer, which would send private files to a third party.
 - **Installable (PWA)** — web app manifest with maskable icons, a static-asset service worker, and safe-area handling so it behaves correctly in standalone mode. The manifest deliberately omits `orientation`: setting it (even to `"any"`) makes Chrome apply an orientation lock that overrides the device's own rotation lock, so an installed app rotates even with rotation switched off.
+- **Search across every chat** — `⌘/Ctrl+K`, or the field in the sidebar (a search icon in the composer toolbar on mobile). Matches message text, image and file captions, and attachment filenames, with the hit highlighted in context and labelled with the chat it came from. Selecting a result opens that chat and scrolls straight to the note. Debounced, with each keystroke aborting the request in flight so a slow response for `re` can't overwrite the results for `report`.
 - **Cross-device sync** — MongoDB Atlas stores everything per-user. Log in on any device and your chats and notes are there.
 - **Opens at latest chat** — the most recently updated chat is selected on load.
 - **Input methods** — type, paste (the clipboard `paste` handler picks up images *and* files), drag-and-drop, or the attach button. Images route to Cloudinary and everything else to R2 automatically.
@@ -299,6 +300,23 @@ CopyPaste is built security-first. The core invariant: **a user can only ever re
 - `createNote` additionally verifies the target `chatId` belongs to the authenticated user before creating a note in it.
 - `deleteChat` deletes all notes scoped by `{ chatId, userId }` — never by `chatId` alone.
 - A client-sent `userId` is **never trusted**.
+
+### Search
+`/api/search` matches substrings rather than using MongoDB's `$text` index.
+`$text` is word-based with stemming, so `auth` would miss `authenticate` and `pdf`
+would miss `report.pdf` — not what anyone expects from a clipboard search. The
+trade-off is that a regex can't be served from an index, so the query is bounded
+instead: scoped to a single `userId`, sorted along a `{ userId, createdAt: -1 }`
+index so matching stops once the result cap is filled rather than sorting every
+match in memory, projected to the fields the list needs, and rate limited.
+
+The query is escaped before being compiled, which matters for two reasons: without
+it the input *is* a regex, so `(a+)+$` would be a ReDoS vector and a lone `[` would
+throw. Escaped, the pattern is a literal — verified matching `(a+)+$` against a
+20,000-character string in 0.04ms.
+
+Results are rendered as split text runs rather than an HTML string with `<mark>`
+injected, so pasted note content can never be interpreted as markup.
 
 ### Input validation & injection resistance
 - All server action inputs validated with Zod schemas at the boundary (username, password, note content/type/language, chat title, IDs).

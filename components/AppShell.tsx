@@ -5,6 +5,7 @@ import type { NoteItem, ChatItem, NoteDraft } from "@/lib/types";
 import NoteEditor from "@/components/NoteEditor";
 import NoteView from "@/components/NoteView";
 import ChatList from "@/components/ChatList";
+import SearchPanel from "@/components/SearchPanel";
 import { createChat } from "@/actions/chats";
 import { createNote } from "@/actions/notes";
 import { toast } from "sonner";
@@ -42,6 +43,8 @@ export default function AppShell({
   const [notes, setNotes] = useState<NoteItem[]>(initialNotes);
   const [notesLoading, setNotesLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [highlightedNoteId, setHighlightedNoteId] = useState<string | null>(null);
 
   // Notes already fetched, keyed by chatId. Switching back to a visited chat is
   // then instant, and we revalidate in the background (stale-while-revalidate).
@@ -54,6 +57,10 @@ export default function AppShell({
   const wantedChatRef = useRef<string | null>(initialChats[0]?._id ?? null);
 
   const listRef = useRef<HTMLDivElement>(null);
+  // Set when a search result targets a note that isn't rendered yet; consumed
+  // once its chat's notes arrive.
+  const pendingJumpRef = useRef<string | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
 
   // ---- Scrolling -----------------------------------------------------------
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
@@ -300,6 +307,75 @@ export default function AppShell({
 
   const toggleSidebar = useCallback(() => setSidebarOpen((v) => !v), []);
 
+  // ---- Search ---------------------------------------------------------------
+  /** Scrolls a rendered note into view and flashes it, so the hit is obvious. */
+  const revealNote = useCallback((noteId: string) => {
+    const row = listRef.current?.querySelector<HTMLElement>(
+      `[data-note-id="${noteId}"]`
+    );
+    if (!row) return false;
+
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    setHighlightedNoteId(noteId);
+    if (highlightTimerRef.current) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(
+      () => setHighlightedNoteId(null),
+      2000
+    );
+    return true;
+  }, []);
+
+  const handleSelectResult = useCallback(
+    (chatId: string, noteId: string) => {
+      if (chatId === activeChatId) {
+        // Already open — but wait a frame so the panel has unmounted first.
+        requestAnimationFrame(() => {
+          if (!revealNote(noteId)) pendingJumpRef.current = noteId;
+        });
+        return;
+      }
+      // Different chat: switch, and let the effect below jump once it loads.
+      pendingJumpRef.current = noteId;
+      setSidebarOpen(false);
+      showChat(chatId);
+    },
+    [activeChatId, revealNote, showChat]
+  );
+
+  // Completes a pending jump as soon as the target note is on screen.
+  useEffect(() => {
+    const target = pendingJumpRef.current;
+    if (!target || notesLoading) return;
+    if (!notes.some((n) => n._id === target)) return;
+    pendingJumpRef.current = null;
+    requestAnimationFrame(() => revealNote(target));
+  }, [notes, notesLoading, revealNote]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Cmd/Ctrl+K from anywhere, the convention people already expect.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const openSearch = useCallback(() => setSearchOpen(true), []);
+  const closeSearch = useCallback(() => setSearchOpen(false), []);
+
   // Close the sidebar on Escape — it's a modal overlay on mobile.
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -317,11 +393,12 @@ export default function AppShell({
         <NoteView
           key={note._id}
           note={note}
+          highlighted={note._id === highlightedNoteId}
           onDeleted={handleNoteDeleted}
           onUpdated={handleNoteUpdated}
         />
       )),
-    [notes, handleNoteDeleted, handleNoteUpdated]
+    [notes, highlightedNoteId, handleNoteDeleted, handleNoteUpdated]
   );
 
   return (
@@ -342,6 +419,7 @@ export default function AppShell({
           onChatCreated={handleChatCreated}
           onChatDeleted={handleChatDeleted}
           onChatRenamed={handleChatRenamed}
+          onOpenSearch={openSearch}
         />
       </aside>
 
@@ -391,11 +469,21 @@ export default function AppShell({
             <NoteEditor
               onSubmitNote={handleSubmitNote}
               onToggleSidebar={toggleSidebar}
+              onOpenSearch={openSearch}
               sidebarOpen={sidebarOpen}
             />
           </div>
         </div>
       </div>
+
+      {/* Mounted only while open, so closing it discards its state. */}
+      {searchOpen && (
+        <SearchPanel
+          chats={chats}
+          onClose={closeSearch}
+          onSelectResult={handleSelectResult}
+        />
+      )}
     </div>
   );
 }

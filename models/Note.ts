@@ -76,6 +76,13 @@ const noteSchema = new mongoose.Schema(
 // and lets MongoDB serve the sorted query without an in-memory sort.
 noteSchema.index({ userId: 1, chatId: 1, createdAt: 1 });
 
+// Search runs across every chat, so it can't use the index above: that one leads
+// with userId then chatId, and without a chatId equality the sort on createdAt
+// can't be served from it. This index lets search walk one user's notes in
+// newest-first order and stop as soon as the result limit is filled, instead of
+// collecting every match and sorting them in memory.
+noteSchema.index({ userId: 1, createdAt: -1 });
+
 export type NoteDoc = InferSchemaType<typeof noteSchema>;
 
 export default mongoose.models.Note ??

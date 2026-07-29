@@ -25,6 +25,7 @@ import {
   Loader2,
   Paperclip,
   File as FileIcon,
+  Search,
   X,
   MessagesSquare,
 } from "lucide-react";
@@ -85,11 +86,13 @@ type Attachment = {
 export default function NoteEditor({
   onSubmitNote,
   onToggleSidebar,
+  onOpenSearch,
   sidebarOpen = false,
 }: {
   /** Resolves true when the note was accepted, false when it failed. */
   onSubmitNote: (draft: NoteDraft) => Promise<boolean>;
   onToggleSidebar?: () => void;
+  onOpenSearch?: () => void;
   sidebarOpen?: boolean;
 }) {
   const [type, setType] = useState<NoteType>("text");
@@ -380,6 +383,18 @@ export default function NoteEditor({
             >
               <MessagesSquare className="w-4 h-4" />
               Chats
+            </button>
+          )}
+
+          {/* Mobile-only: on desktop the sidebar already has a search field. */}
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              aria-label="Search notes"
+              className="lg:hidden shrink-0 flex items-center justify-center w-9 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 active:bg-slate-200 dark:active:bg-slate-700 transition"
+            >
+              <Search className="w-4 h-4" />
             </button>
           )}
 

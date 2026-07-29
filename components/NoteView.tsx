@@ -38,10 +38,13 @@ const LANGUAGES = [
 
 function NoteView({
   note,
+  highlighted = false,
   onDeleted,
   onUpdated,
 }: {
   note: NoteItem;
+  /** Briefly ringed after being jumped to from search. */
+  highlighted?: boolean;
   onDeleted: (id: string) => void;
   onUpdated: (note: NoteItem) => void;
 }) {
@@ -100,10 +103,15 @@ function NoteView({
   const canEdit = !isAttachment && !isPendingNote;
 
   return (
-    <div className="max-w-3xl mx-auto">
+    // data-note-id is the hook AppShell uses to scroll a search hit into view.
+    <div className="max-w-3xl mx-auto" data-note-id={note._id}>
       <div
-        className={`bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden transition-opacity ${
+        className={`bg-white dark:bg-slate-900 rounded-xl border shadow-sm overflow-hidden transition-all ${
           isPendingNote ? "opacity-60" : "opacity-100"
+        } ${
+          highlighted
+            ? "border-blue-400 dark:border-blue-500 ring-2 ring-blue-400/60"
+            : "border-slate-200 dark:border-slate-800"
         }`}
       >
         <div className="px-3 sm:px-4 py-2 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
