@@ -9,6 +9,11 @@ export interface NoteItem {
   publicId: string;
   language: string;
   createdAt: string; // ISO string for client serialization
+  /**
+   * Client-only: true while an optimistically-inserted note is still being
+   * persisted. Never set by the server.
+   */
+  pending?: boolean;
 }
 
 export interface ChatItem {
@@ -16,4 +21,13 @@ export interface ChatItem {
   title: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** What the composer hands off when the user hits send. */
+export interface NoteDraft {
+  type: NoteType;
+  content: string;
+  imageUrl: string;
+  publicId: string;
+  language: string;
 }

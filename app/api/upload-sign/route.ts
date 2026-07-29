@@ -17,12 +17,17 @@ export async function POST(request: Request) {
   }
 
   try {
-    const body = await request.json();
-    const { paramsToSign } = body;
+    const body = (await request.json()) as {
+      paramsToSign?: Record<string, unknown>;
+      params_to_sign?: Record<string, unknown>;
+    };
+    // Accept either spelling — Cloudinary's own widgets use camelCase, while
+    // raw signed-upload examples use snake_case.
+    const paramsToSign = body.paramsToSign ?? body.params_to_sign;
 
-    if (!paramsToSign) {
+    if (!paramsToSign || typeof paramsToSign !== "object") {
       return NextResponse.json(
-        { error: "Missing params_to_sign" },
+        { error: "Missing paramsToSign" },
         { status: 400 }
       );
     }

@@ -21,6 +21,75 @@ body {
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }
 
+/*
+ * App viewport
+ * ------------
+ * Pinned to the *visual* viewport so the composer (and its send button) always
+ * stays above the mobile keyboard. `ViewportFix` writes --app-height/--app-offset
+ * from window.visualViewport; the fallbacks keep this correct with JS disabled
+ * and on desktop.
+ *
+ * Declaration order matters: each line overrides the previous one only if the
+ * browser understands it (100dvh → older browsers keep 100vh).
+ */
+.app-viewport {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--app-offset, 0px);
+  height: 100vh;
+  height: 100dvh;
+  height: var(--app-height, 100dvh);
+}
+
+/*
+ * Composer sizing is derived from --app-height (the *visual* viewport) rather
+ * than dvh, because on iOS dvh doesn't shrink when the keyboard opens. Keying
+ * off the same variable the shell uses means the input can never grow tall
+ * enough to push the send button out of reach.
+ */
+.composer-shell {
+  max-height: calc(var(--app-height, 100dvh) * 0.6);
+}
+.composer-input {
+  max-height: calc(var(--app-height, 100dvh) * 0.3);
+}
+
+/* Horizontal toolbars: scrollable but without a visible scrollbar. */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Prevent iOS rubber-banding from dragging the whole fixed app shell around. */
+.overscroll-none-y {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Skeleton shimmer used while a chat's notes are loading. */
+@keyframes cp-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.cp-skeleton {
+  animation: cp-pulse 1.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cp-skeleton {
+    animation: none;
+  }
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

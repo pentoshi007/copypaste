@@ -1,12 +1,23 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import dbConnect from "@/lib/db";
 import Note from "@/models/Note";
 import Chat from "@/models/Chat";
 import type { NoteItem, NoteType } from "@/lib/types";
+
+/*
+ * These actions deliberately do NOT call `revalidatePath("/")`.
+ *
+ * The page is `force-dynamic`, so there is no cached render to invalidate —
+ * revalidating just forced the client to re-request a full RSC payload, which
+ * re-ran auth, the DB connect and both list queries after *every* note. The
+ * client already has everything it needs: each action returns the created or
+ * updated entity and AppShell merges it into local state, so the round-trip
+ * was pure latency.
+ */
 
 const createNoteSchema = z.object({
   chatId: z.string().length(24).regex(/^[a-f0-9]+$/i), // MongoDB ObjectId
@@ -70,12 +81,16 @@ export async function createNote(
   try {
     await dbConnect();
 
-    // CRITICAL: verify the chat belongs to this user (IDOR prevention)
-    // Use .lean() + .select() — we only need title for auto-naming
-    const chat = await Chat.findOne(
+    // CRITICAL: verify the chat belongs to this user (IDOR prevention).
+    // One round trip does double duty here — it authorises the write *and*
+    // bumps the chat's activity timestamp. `new: false` returns the document as
+    // it was, so we can still tell whether it's an untitled ("New Chat") chat.
+    const chat = await Chat.findOneAndUpdate(
       { _id: chatId, userId: session.user.id },
-      { title: 1 }
+      { updatedAt: new Date() },
+      { new: false, select: "title" }
     ).lean();
+
     if (!chat) {
       return { error: "Chat not found" };
     }
@@ -90,22 +105,18 @@ export async function createNote(
       language,
     });
 
-    // Auto-title the chat from the first note's content if it's still "New Chat"
-    let chatTitle = chat.title;
-    if (chat.title === "New Chat") {
-      if (type === "image") {
-        chatTitle = content.trim() || "Image";
-      } else {
-        const c = content.trim();
-        chatTitle = c.length > 50 ? c.slice(0, 47) + "..." : c || "New Chat";
+    // Auto-title from the first note. Only the first note in a chat pays for
+    // this extra write; every later note is two round trips total.
+    let chatTitle: string = chat.title;
+    if (chatTitle === "New Chat") {
+      chatTitle = deriveChatTitle(type, content);
+      if (chatTitle !== chat.title) {
+        await Chat.updateOne(
+          { _id: chatId, userId: session.user.id },
+          { title: chatTitle }
+        );
       }
     }
-
-    // Single updateOne — no need to fetch the doc back
-    await Chat.updateOne(
-      { _id: chatId, userId: session.user.id },
-      { title: chatTitle, updatedAt: new Date() }
-    );
 
     const note: NoteItem = {
       _id: String(doc._id),
@@ -118,7 +129,6 @@ export async function createNote(
       createdAt: serializeDate(doc.createdAt),
     };
 
-    revalidatePath("/");
     return { note, chatTitle };
   } catch {
     return { error: "Failed to create note" };
@@ -205,7 +215,6 @@ export async function updateNote(
       createdAt: serializeDate(updated.createdAt),
     };
 
-    revalidatePath("/");
     return { note };
   } catch {
     return { error: "Failed to update note" };
@@ -244,21 +253,33 @@ export async function deleteNote(
       return { error: "Note not found" };
     }
 
-    // Best-effort Cloudinary cleanup for image notes (fire-and-forget)
+    // Cloudinary cleanup runs after the response is flushed. A bare
+    // fire-and-forget promise can be killed when the serverless invocation
+    // ends; `after()` keeps the function alive just long enough.
     if (note.publicId) {
-      try {
-        const cloudinary = (await import("cloudinary")).default;
-        cloudinary.v2.uploader.destroy(note.publicId).catch(() => {});
-      } catch {
-        // non-fatal — Cloudinary env may not be configured in dev
-      }
+      const publicId = note.publicId;
+      after(async () => {
+        try {
+          const cloudinary = (await import("cloudinary")).default;
+          await cloudinary.v2.uploader.destroy(publicId).catch(() => {});
+        } catch {
+          // non-fatal — Cloudinary env may not be configured in dev
+        }
+      });
     }
 
-    revalidatePath("/");
     return { ok: true };
   } catch {
     return { error: "Failed to delete note" };
   }
+}
+
+/** Names a brand-new chat after its first note. */
+function deriveChatTitle(type: NoteType, content: string): string {
+  const trimmed = content.trim();
+  if (type === "image") return trimmed || "Image";
+  if (!trimmed) return "New Chat";
+  return trimmed.length > 50 ? `${trimmed.slice(0, 47)}...` : trimmed;
 }
 
 function serializeDate(d: unknown): string {

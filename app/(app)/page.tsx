@@ -1,78 +1,52 @@
-import { auth } from "@/auth";
+import { getSession } from "@/lib/session";
 import dbConnect from "@/lib/db";
 import Note from "@/models/Note";
 import Chat from "@/models/Chat";
 import AppShell from "@/components/AppShell";
-import type { NoteItem, ChatItem } from "@/lib/types";
+import {
+  CHATS_LIMIT,
+  CHAT_PROJECTION,
+  NOTES_LIMIT,
+  NOTE_PROJECTION,
+  serializeChat,
+  serializeNote,
+} from "@/lib/serialize";
+import type { NoteItem } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const session = await auth();
+  // The session decode and the Mongo handshake are independent, so don't pay
+  // for them one after the other.
+  const [session] = await Promise.all([getSession(), dbConnect()]);
   const userId = session!.user.id;
 
-  await dbConnect();
-
-  // Fetch all chats for this user, sorted by updatedAt desc (most recent first)
-  // Use .select() projection + .lean() for fast read-only access
-  const chats = (await Chat.find(
-    { userId },
-    { _id: 1, title: 1, createdAt: 1, updatedAt: 1 }
-  )
+  // Chats for this user, most recently active first.
+  // Projection + .lean() skip Mongoose document hydration; the compound index
+  // { userId, updatedAt: -1 } serves the sort without an in-memory pass.
+  const chats = await Chat.find({ userId }, CHAT_PROJECTION)
     .sort({ updatedAt: -1 })
-    .limit(200) // safety cap
-    .lean()) as unknown as ChatItem[];
+    .limit(CHATS_LIMIT)
+    .lean();
 
-  const serializedChats: ChatItem[] = chats.map((c) => ({
-    _id: String(c._id),
-    title: c.title ?? "New Chat",
-    createdAt: serializeDate(c.createdAt),
-    updatedAt: serializeDate(c.updatedAt),
-  }));
+  const serializedChats = chats.map(serializeChat);
 
-  // Fetch notes for the most recently updated chat (if any)
-  // Use .select() projection + .lean() + .limit() for fast reads
+  // Notes for the chat that opens by default.
   let serializedNotes: NoteItem[] = [];
   if (serializedChats.length > 0) {
-    const activeChatId = serializedChats[0]._id;
-    const notes = (await Note.find(
-      { userId, chatId: activeChatId },
-      {
-        _id: 1,
-        chatId: 1,
-        type: 1,
-        content: 1,
-        imageUrl: 1,
-        publicId: 1,
-        language: 1,
-        createdAt: 1,
-      }
+    const notes = await Note.find(
+      { userId, chatId: serializedChats[0]._id },
+      NOTE_PROJECTION
     )
-      .sort({ createdAt: 1 }) // ascending — oldest first, like a chat
-      .limit(500) // safety cap
-      .lean()) as unknown as NoteItem[];
+      // Newest-first so the cap keeps recent notes, then reversed for display.
+      .sort({ createdAt: -1 })
+      .limit(NOTES_LIMIT)
+      .lean();
 
-    serializedNotes = notes.map((n) => ({
-      _id: String(n._id),
-      chatId: String(n.chatId),
-      type: n.type,
-      content: n.content ?? "",
-      imageUrl: n.imageUrl ?? "",
-      publicId: n.publicId ?? "",
-      language: n.language ?? "",
-      createdAt: serializeDate(n.createdAt),
-    }));
+    serializedNotes = notes.map(serializeNote).reverse();
   }
 
   return (
-    <AppShell
-      initialChats={serializedChats}
-      initialNotes={serializedNotes}
-    />
+    <AppShell initialChats={serializedChats} initialNotes={serializedNotes} />
   );
-}
-
-function serializeDate(d: unknown): string {
-  if (typeof d === "string") return d;
-  return new Date(d as unknown as string).toISOString();
 }

@@ -2,60 +2,50 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import dbConnect from "@/lib/db";
 import Note from "@/models/Note";
-import type { NoteItem } from "@/lib/types";
+import {
+  NOTES_LIMIT,
+  NOTE_PROJECTION,
+  serializeNote,
+} from "@/lib/serialize";
+
+const OBJECT_ID = /^[a-f0-9]{24}$/i;
 
 export async function GET(request: Request) {
-  const session = await auth();
+  const { searchParams } = new URL(request.url);
+  const chatId = searchParams.get("chatId");
+
+  // Validate before touching the DB: an unparseable id would otherwise reach
+  // Mongoose and surface as a CastError-driven 500 instead of a 400.
+  if (!chatId || !OBJECT_ID.test(chatId)) {
+    return NextResponse.json({ error: "Invalid chatId" }, { status: 400 });
+  }
+
+  // Auth and the connection handshake don't depend on each other.
+  const [session] = await Promise.all([auth(), dbConnect()]);
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { searchParams } = new URL(request.url);
-  const chatId = searchParams.get("chatId");
-
-  if (!chatId) {
-    return NextResponse.json({ error: "Missing chatId" }, { status: 400 });
-  }
-
   try {
-    await dbConnect();
-
-    // CRITICAL: scope by userId to prevent IDOR — never trust client chatId alone
-    // Use .select() projection to fetch only the fields the client needs,
-    // .lean() to skip Mongoose document hydration (2-5x faster),
-    // and .limit() to cap the result set.
-    const notes = (await Note.find(
+    // CRITICAL: scope by userId to prevent IDOR — never trust client chatId alone.
+    // Sorted newest-first so the cap keeps the *recent* notes (sorting ascending
+    // with a limit silently dropped the newest notes in long chats), then
+    // reversed for oldest-first chat order.
+    const notes = await Note.find(
       { chatId, userId: session.user.id },
-      {
-        _id: 1,
-        chatId: 1,
-        type: 1,
-        content: 1,
-        imageUrl: 1,
-        publicId: 1,
-        language: 1,
-        createdAt: 1,
-      }
+      NOTE_PROJECTION
     )
-      .sort({ createdAt: 1 }) // ascending — oldest first, like a chat
-      .limit(500) // safety cap — prevents unbounded scans on very old chats
-      .lean()) as unknown as NoteItem[];
+      .sort({ createdAt: -1 })
+      .limit(NOTES_LIMIT)
+      .lean();
 
-    const serialized: NoteItem[] = notes.map((n) => ({
-      _id: String(n._id),
-      chatId: String(n.chatId),
-      type: n.type,
-      content: n.content ?? "",
-      imageUrl: n.imageUrl ?? "",
-      publicId: n.publicId ?? "",
-      language: n.language ?? "",
-      createdAt:
-        typeof n.createdAt === "string"
-          ? n.createdAt
-          : new Date(n.createdAt as unknown as string).toISOString(),
-    }));
+    const serialized = notes.map(serializeNote).reverse();
 
-    return NextResponse.json({ notes: serialized });
+    return NextResponse.json(
+      { notes: serialized },
+      // Per-user data: never store it in a shared or disk cache.
+      { headers: { "Cache-Control": "private, no-store" } }
+    );
   } catch {
     return NextResponse.json(
       { error: "Failed to fetch notes" },

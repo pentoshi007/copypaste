@@ -1,12 +1,16 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import dbConnect from "@/lib/db";
 import Chat from "@/models/Chat";
 import Note from "@/models/Note";
 import type { ChatItem } from "@/lib/types";
+
+// No `revalidatePath("/")` here — see the note in actions/notes.ts. The client
+// updates its own state from the returned chat, so invalidating the (dynamic)
+// page only added a wasted server round-trip per action.
 
 const titleSchema = z
   .string()
@@ -42,7 +46,6 @@ export async function createChat(title?: string): Promise<ChatActionResult> {
       updatedAt: serializeDate(doc.updatedAt),
     };
 
-    revalidatePath("/");
     return { chat };
   } catch {
     return { error: "Failed to create chat" };
@@ -90,7 +93,6 @@ export async function updateChatTitle(
       updatedAt: serializeDate(doc.updatedAt),
     };
 
-    revalidatePath("/");
     return { chat };
   } catch {
     return { error: "Failed to update chat" };
@@ -123,32 +125,37 @@ export async function deleteChat(
       return { error: "Chat not found" };
     }
 
-    // Find all note publicIds for Cloudinary cleanup (projection: only publicId)
-    const notes = await Note.find(
+    // Collect image publicIds before the notes are gone (projection: publicId only)
+    const imageNotes = await Note.find(
       { chatId, userId: session.user.id, publicId: { $ne: "" } },
       { publicId: 1 }
     ).lean();
 
-    // Parallel Cloudinary cleanup — fire all destroys concurrently
-    if (notes.length > 0) {
-      try {
-        const cloudinary = (await import("cloudinary")).default;
-        await Promise.allSettled(
-          notes.map((n) =>
-            n.publicId
-              ? cloudinary.v2.uploader.destroy(n.publicId).catch(() => {})
-              : Promise.resolve()
-          )
-        );
-      } catch {
-        // non-fatal
-      }
-    }
+    const publicIds = imageNotes
+      .map((n) => n.publicId)
+      .filter((id): id is string => Boolean(id));
 
-    // Delete all notes in this chat
+    // Delete the notes — this is what the user is waiting on.
     await Note.deleteMany({ chatId, userId: session.user.id });
 
-    revalidatePath("/");
+    // Cloudinary cleanup runs *after* the response is flushed, so deleting a
+    // chat full of images no longer blocks the UI on N remote API calls.
+    // `delete_resources` handles up to 100 ids per request.
+    if (publicIds.length > 0) {
+      after(async () => {
+        try {
+          const cloudinary = (await import("cloudinary")).default;
+          for (let i = 0; i < publicIds.length; i += 100) {
+            await cloudinary.v2.api
+              .delete_resources(publicIds.slice(i, i + 100))
+              .catch(() => {});
+          }
+        } catch {
+          // non-fatal — Cloudinary env may not be configured in dev
+        }
+      });
+    }
+
     return { ok: true };
   } catch {
     return { error: "Failed to delete chat" };

@@ -1,10 +1,28 @@
 "use client";
 
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Copy, Check } from "lucide-react";
-import { useState } from "react";
+import { useState, lazy, Suspense } from "react";
 import { toast } from "sonner";
+
+// Loaded in its own chunk, so pages without code notes never download Prism.
+const CodeHighlighter = lazy(() => import("./CodeHighlighter"));
+
+/**
+ * Unhighlighted view of the same code, styled to match the oneDark theme.
+ *
+ * Rendered on the server and while the highlighter chunk is still in flight, so
+ * the code itself is readable immediately rather than after a JS round-trip.
+ */
+function PlainCode({ content }: { content: string }) {
+  return (
+    <pre
+      className="m-0 p-4 overflow-x-auto text-[0.8125rem] leading-normal font-mono text-slate-200"
+      style={{ background: "#282c34" }}
+    >
+      <code className="whitespace-pre-wrap break-words">{content}</code>
+    </pre>
+  );
+}
 
 export default function CodeBlock({
   content,
@@ -27,7 +45,7 @@ export default function CodeBlock({
   };
 
   return (
-    <div className="relative group rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
+    <div className="relative rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700">
       <div className="flex items-center justify-between px-3 py-1.5 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700">
         <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
           {language || "plaintext"}
@@ -48,19 +66,10 @@ export default function CodeBlock({
           )}
         </button>
       </div>
-      <SyntaxHighlighter
-        language={language || "plaintext"}
-        style={oneDark}
-        customStyle={{
-          margin: 0,
-          borderRadius: 0,
-          fontSize: "0.875rem",
-          padding: "1rem",
-        }}
-        wrapLongLines
-      >
-        {content}
-      </SyntaxHighlighter>
+
+      <Suspense fallback={<PlainCode content={content} />}>
+        <CodeHighlighter content={content} language={language} />
+      </Suspense>
     </div>
   );
 }

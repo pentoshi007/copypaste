@@ -18,6 +18,7 @@ export default function ChatList({
   chats,
   activeChatId,
   onSelectChat,
+  onPrefetchChat,
   onChatCreated,
   onChatDeleted,
   onChatRenamed,
@@ -25,6 +26,8 @@ export default function ChatList({
   chats: ChatItem[];
   activeChatId: string | null;
   onSelectChat: (id: string) => void;
+  /** Called on hover/touch-start so a chat's notes are cached before the tap lands. */
+  onPrefetchChat?: (id: string) => void;
   onChatCreated: (chat: ChatItem) => void;
   onChatDeleted: (id: string) => void;
   onChatRenamed: (id: string, title: string) => void;
@@ -138,7 +141,8 @@ export default function ChatList({
                         }}
                         autoFocus
                         maxLength={100}
-                        className="flex-1 min-w-0 px-2 py-1 rounded text-sm bg-white dark:bg-slate-900 border border-blue-400 text-slate-900 dark:text-white outline-none"
+                        // text-base on mobile stops iOS Safari zooming on focus.
+                        className="flex-1 min-w-0 px-2 py-1 rounded text-base sm:text-sm bg-white dark:bg-slate-900 border border-blue-400 text-slate-900 dark:text-white outline-none"
                       />
                       <button
                         onClick={() => handleRename(chat._id)}
@@ -188,6 +192,10 @@ export default function ChatList({
                     <>
                       <button
                         onClick={() => onSelectChat(chat._id)}
+                        onPointerEnter={() => onPrefetchChat?.(chat._id)}
+                        onTouchStart={() => onPrefetchChat?.(chat._id)}
+                        onFocus={() => onPrefetchChat?.(chat._id)}
+                        aria-current={isActive ? "true" : undefined}
                         className="w-full text-left px-3 py-2.5 pr-16"
                       >
                         <div className="flex items-start gap-2">
@@ -208,8 +216,10 @@ export default function ChatList({
                         </div>
                       </button>
 
-                      {/* Edit + Delete buttons */}
-                      <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition">
+                      {/* Edit + Delete buttons.
+                          Always visible on touch screens — `group-hover` never
+                          fires there, which made them unreachable on mobile. */}
+                      <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100 transition">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();

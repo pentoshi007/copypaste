@@ -31,8 +31,8 @@ Notes are organized into **chats** (like conversation threads). Each chat auto-t
 | Database | MongoDB Atlas (free tier M0) via Mongoose 9 |
 | Auth | Auth.js v5 (`next-auth@beta`) — Credentials provider, JWT sessions |
 | Password hashing | bcryptjs (12 salt rounds) |
-| Image hosting | Cloudinary via `next-cloudinary` SDK (signed uploads) |
-| Code highlighting | react-syntax-highlighter (Prism) |
+| Image hosting | Cloudinary — server-signed direct uploads (no client SDK) |
+| Code highlighting | react-syntax-highlighter (`PrismAsyncLight`, lazy-loaded) |
 | Icons | lucide-react |
 | Toasts | sonner |
 | Validation | Zod 4 |
