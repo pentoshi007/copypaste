@@ -31,22 +31,23 @@ export default function LinkBlock({ url }: { url: string }) {
   }
 
   return (
-    <div className="flex items-center gap-2 group">
-      <div className="flex-1 min-w-0">
+    <div className="flex items-center gap-2 group min-w-0">
+      {/* Horizontally scrollable so the full URL is reachable on mobile & desktop. */}
+      <div className="flex-1 min-w-0 overflow-x-auto no-scrollbar">
         <a
           href={safeUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 hover:underline truncate"
+          className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
         >
           <ExternalLink className="w-4 h-4 shrink-0" />
-          <span className="truncate">{url}</span>
+          <span className="whitespace-nowrap">{url}</span>
         </a>
       </div>
       <button
         onClick={handleCopy}
         aria-label="Copy link"
-        className="shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+        className="shrink-0 self-center p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
       >
         {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
       </button>
