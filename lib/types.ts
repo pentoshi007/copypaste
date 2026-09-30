@@ -1,4 +1,10 @@
-export type NoteType = "text" | "code" | "link" | "image" | "file";
+import type { AttachmentRef } from "@/lib/attachments";
+
+export type NoteType = "text" | "code" | "link" | "image" | "file" | "group";
+
+export interface NoteAttachment extends Omit<AttachmentRef, "storageKey"> {
+  index: number;
+}
 
 export interface NoteItem {
   _id: string;
@@ -8,15 +14,11 @@ export interface NoteItem {
   imageUrl: string;
   publicId: string;
   language: string;
-  createdAt: string; // ISO string for client serialization
-  /** File attachments (type "file"). */
+  createdAt: string;
   fileName?: string;
   fileSize?: number;
   mimeType?: string;
-  /**
-   * Client-only: true while an optimistically-inserted note is still being
-   * persisted. Never set by the server.
-   */
+  attachments?: NoteAttachment[];
   pending?: boolean;
 }
 
@@ -27,16 +29,19 @@ export interface ChatItem {
   updatedAt: string;
 }
 
-/** What the composer hands off when the user hits send. */
 export interface NoteDraft {
   type: NoteType;
   content: string;
   imageUrl: string;
   publicId: string;
   language: string;
-  /** Set for type "file": the R2 object key returned by /api/upload-url. */
   storageKey?: string;
   fileName?: string;
   fileSize?: number;
   mimeType?: string;
+  attachments?: DraftAttachment[];
+}
+
+export interface DraftAttachment extends NoteAttachment {
+  storageKey?: string;
 }

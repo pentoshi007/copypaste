@@ -17,9 +17,7 @@ import type { NoteItem } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  // Middleware and the layout both gate this route, but don't rely on a
-  // non-null assertion for an authorization guarantee — if either ever stops
-  // matching this path, this must still fail closed.
+
   const session = await getSession();
   if (!session?.user?.id) {
     redirect("/login");
@@ -28,9 +26,6 @@ export default async function HomePage() {
 
   await dbConnect();
 
-  // Chats for this user, most recently active first.
-  // Projection + .lean() skip Mongoose document hydration; the compound index
-  // { userId, updatedAt: -1 } serves the sort without an in-memory pass.
   const chats = await Chat.find({ userId }, CHAT_PROJECTION)
     .sort({ updatedAt: -1 })
     .limit(CHATS_LIMIT)
@@ -38,14 +33,13 @@ export default async function HomePage() {
 
   const serializedChats = chats.map(serializeChat);
 
-  // Notes for the chat that opens by default.
   let serializedNotes: NoteItem[] = [];
   if (serializedChats.length > 0) {
     const notes = await Note.find(
       { userId, chatId: serializedChats[0]._id },
       NOTE_PROJECTION
     )
-      // Newest-first so the cap keeps recent notes, then reversed for display.
+
       .sort({ createdAt: -1 })
       .limit(NOTES_LIMIT)
       .lean();

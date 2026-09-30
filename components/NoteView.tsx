@@ -6,10 +6,15 @@ import CodeBlock from "./CodeBlock";
 import LinkBlock from "./LinkBlock";
 import ImageBlock from "./ImageBlock";
 import FileBlock from "./FileBlock";
+import GroupBlock from "./GroupBlock";
 import LocalTime from "./LocalTime";
 import { Trash2, Loader2, Pencil, Check, X } from "lucide-react";
 import { memo, useState, useTransition } from "react";
-import { deleteNote, updateNote } from "@/actions/notes";
+import {
+  deleteNote,
+  updateAttachmentCaption,
+  updateNote,
+} from "@/actions/notes";
 import { toast } from "sonner";
 
 const LANGUAGES = [
@@ -36,17 +41,21 @@ const LANGUAGES = [
   "markdown",
 ];
 
+function noop() {}
+
 function NoteView({
   note,
   highlighted = false,
   onDeleted,
   onUpdated,
+  onAttachmentCaptionChanged,
 }: {
   note: NoteItem;
-  /** Briefly ringed after being jumped to from search. */
+
   highlighted?: boolean;
   onDeleted: (id: string) => void;
   onUpdated: (note: NoteItem) => void;
+  onAttachmentCaptionChanged?: (index: number, caption: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -54,8 +63,6 @@ function NoteView({
   const [editLanguage, setEditLanguage] = useState(note.language || "plaintext");
   const [isPending, startTransition] = useTransition();
 
-  // An optimistically-rendered note has no server id yet, so it can't be
-  // edited or deleted until it lands.
   const isPendingNote = Boolean(note.pending);
 
   const handleDelete = () => {
@@ -97,13 +104,24 @@ function NoteView({
     setIsEditing(true);
   };
 
-  // Attachments can't be edited inline (would need a re-upload). Their caption
-  // lives in `content`, but editing that alone isn't wired up yet.
+  const handleCaptionSave = async (index: number, caption: string) => {
+    const result = await updateAttachmentCaption({
+      noteId: note._id,
+      index,
+      caption,
+    });
+    if (result.error) {
+      toast.error(result.error);
+      return false;
+    }
+    return true;
+  };
+
   const isAttachment = note.type === "image" || note.type === "file";
   const canEdit = !isAttachment && !isPendingNote;
 
   return (
-    // data-note-id is the hook AppShell uses to scroll a search hit into view.
+
     <div className="max-w-3xl mx-auto" data-note-id={note._id}>
       <div
         className={`bg-white dark:bg-slate-900 rounded-xl border shadow-sm overflow-hidden transition-all ${
@@ -222,7 +240,7 @@ function NoteView({
                 autoFocus
                 rows={note.type === "code" ? 8 : 4}
                 maxLength={10000}
-                // text-base on mobile stops iOS Safari zooming on focus.
+
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-base sm:text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition resize-y font-mono"
               />
             </div>
@@ -246,6 +264,22 @@ function NoteView({
                   pending={isPendingNote}
                 />
               )}
+              {note.type === "group" && (
+                <>
+                  <GroupBlock
+                    noteId={note._id}
+                    attachments={note.attachments ?? []}
+                    pending={isPendingNote}
+                    saveCaption={handleCaptionSave}
+                    onUpdated={onAttachmentCaptionChanged ?? noop}
+                  />
+                  {note.content && (
+                    <p className="mt-3 text-sm text-slate-600 dark:text-slate-400 whitespace-pre-wrap break-words">
+                      {note.content}
+                    </p>
+                  )}
+                </>
+              )}
             </>
           )}
         </div>
@@ -254,9 +288,4 @@ function NoteView({
   );
 }
 
-/**
- * Memoised: without this, any AppShell state change (typing in the composer,
- * switching a chat, toggling the sidebar) re-rendered every note in the list —
- * including re-running syntax highlighting for each code note.
- */
 export default memo(NoteView);

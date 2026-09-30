@@ -23,8 +23,7 @@ export default function TextBlock({ content }: { content: string }) {
       <p className="whitespace-pre-wrap break-words text-slate-800 dark:text-slate-200 pr-10">
         {content}
       </p>
-      {/* Visible by default on touch screens — `group-hover` never fires there,
-          so a hover-only copy button is unusable on mobile. */}
+      {}
       <button
         onClick={handleCopy}
         aria-label="Copy text"

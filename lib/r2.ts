@@ -1,26 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import { isInlineViewable } from "@/lib/preview";
 
-/**
- * Cloudflare R2 access for file attachments (everything that isn't an image —
- * images stay on Cloudinary, which gives us delivery-time transforms).
- *
- * Design notes:
- *
- * - The bucket stays **private**. Nothing is world-readable, which matters for
- *   a personal clipboard. That means no Public Development URL and no custom
- *   domain are required.
- * - Uploads: we sign a short-lived PUT and the browser sends bytes straight to
- *   R2. They never pass through this server, so upload speed is one hop to
- *   Cloudflare's edge and costs us no bandwidth.
- * - Downloads: we check note ownership, then redirect to a short-lived signed
- *   GET. Because that's a top-level navigation, no CORS is involved.
- * - `Content-Disposition` is stored on the object at upload time (R2 supports it
- *   as PutObject system metadata), so a plain GET downloads with the original
- *   filename. R2 does *not* support the `response-content-disposition` query
- *   override on GetObject, which is why it has to be set on the way in.
- */
-
 export type R2Config = {
   accountId: string;
   accessKeyId: string;
@@ -28,14 +8,8 @@ export type R2Config = {
   bucket: string;
 };
 
-const DEFAULT_MAX_FILE_BYTES = 100 * 1024 * 1024; // 100MB
+const DEFAULT_MAX_FILE_BYTES = 100 * 1024 * 1024;
 
-/**
- * Refuse uploads beyond this. Keeps the 10GB free tier predictable.
- *
- * Parsed defensively: a malformed env value used to produce NaN, and every
- * `size > NaN` comparison is false, which silently disabled the cap entirely.
- */
 function parseMaxFileBytes(): number {
   const raw = process.env.R2_MAX_FILE_BYTES;
   if (!raw) return DEFAULT_MAX_FILE_BYTES;
@@ -64,23 +38,20 @@ function getClient(config: R2Config): AwsClient {
       accessKeyId: config.accessKeyId,
       secretAccessKey: config.secretAccessKey,
       service: "s3",
-      region: "auto", // R2 ignores the region, but SigV4 requires one
+      region: "auto",
     });
   }
   return cachedClient;
 }
 
-/** Path-style object endpoint: https://<account>.r2.cloudflarestorage.com/<bucket>/<key> */
 function objectEndpoint(config: R2Config, key: string): string {
   const encoded = key.split("/").map(encodeURIComponent).join("/");
   return `https://${config.accountId}.r2.cloudflarestorage.com/${config.bucket}/${encoded}`;
 }
 
-/** Strips anything that could confuse a path, a header, or a filesystem. */
 export function sanitizeFileName(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? "file";
   const cleaned = base
-    // Control characters, quotes and path separators.
     .replace(/[\u0000-\u001f\u007f"'\\/]+/g, "_")
     .replace(/\s+/g, " ")
     .trim();
@@ -88,27 +59,11 @@ export function sanitizeFileName(name: string): string {
   return safe || "file";
 }
 
-/**
- * Object keys are namespaced by the authenticated user id and carry a random
- * segment, so uploads can't collide or be guessed. The sanitized filename is
- * kept as the last segment purely so keys are readable in the dashboard.
- */
 export function buildFileKey(userId: string, fileName: string): string {
   const id = crypto.randomUUID().replace(/-/g, "");
   return `f/${userId}/${id}/${sanitizeFileName(fileName)}`;
 }
 
-/**
- * Builds a `Content-Disposition` value that survives non-ASCII filenames.
- *
- * The plain `filename=` parameter is ASCII-only for old clients; `filename*`
- * carries the real UTF-8 name per RFC 5987.
- *
- * The disposition is chosen once, at upload: R2 doesn't support the
- * `response-content-disposition` override on GetObject, so it can't be varied
- * per request. `inline` for formats a browser renders natively (so they can be
- * previewed in-app), `attachment` for everything else.
- */
 export function contentDispositionFor(
   fileName: string,
   mimeType = ""
@@ -121,12 +76,6 @@ export function contentDispositionFor(
   )}`;
 }
 
-/**
- * Fetches the first `maxBytes` of an object.
- *
- * Used for text previews: a Range request means a 50MB log file costs one small
- * read instead of streaming the whole thing.
- */
 export async function getObjectRange(
   config: R2Config,
   key: string,
@@ -138,7 +87,7 @@ export async function getObjectRange(
       method: "GET",
       headers: { Range: `bytes=0-${maxBytes - 1}` },
     });
-    // 206 = partial (truncated), 200 = whole object fit inside the range.
+
     if (res.status !== 200 && res.status !== 206) return null;
     const body = await res.text();
     return { body, truncated: res.status === 206 };
@@ -147,21 +96,12 @@ export async function getObjectRange(
   }
 }
 
-/**
- * Whether an object key belongs to this user.
- *
- * This is the check that stops one user from attaching another user's file.
- * The key arrives from the browser when a note is created, so it must never be
- * trusted: without this, an attacker could submit `f/<victimId>/.../secret.pdf`
- * as their own note and then download it through the ownership-checked route.
- */
 export function isOwnedFileKey(key: string, userId: string): boolean {
   if (!key || !userId) return false;
   if (key.length > 512) return false;
-  // Defensive: a userId containing a separator would let the prefix check be
-  // satisfied by a key in someone else's namespace.
+
   if (!/^[a-f0-9]{24}$/i.test(userId)) return false;
-  // No traversal, no doubled separators, no absolute paths.
+
   if (key.includes("..") || key.includes("//") || key.startsWith("/")) {
     return false;
   }
@@ -173,13 +113,6 @@ export type ObjectMetadata = {
   contentType: string;
 };
 
-/**
- * Reads an object's real size and content type.
- *
- * Used to verify an upload actually landed before a note referencing it is
- * saved, and to record the true size rather than a client-reported number.
- * HeadObject is a Class B operation (10M/month free).
- */
 export async function headObject(
   config: R2Config,
   key: string
@@ -200,16 +133,6 @@ export async function headObject(
   }
 }
 
-/**
- * Presigns a PUT.
- *
- * Only `host` is signed (aws4fetch's default). `Content-Type` and
- * `Content-Disposition` are sent by the browser unsigned — R2 still stores them
- * as system metadata, and leaving them out of the signature means a mangled or
- * proxy-rewritten header can't break the upload. Because the bucket is private
- * and downloads are forced to `attachment`, a wrong stored content type has no
- * security impact here.
- */
 export async function presignPut(
   config: R2Config,
   key: string,
@@ -223,7 +146,6 @@ export async function presignPut(
   return signed.url.toString();
 }
 
-/** Presigns a GET, used for ownership-checked downloads. */
 export async function presignGet(
   config: R2Config,
   key: string,
@@ -237,12 +159,6 @@ export async function presignGet(
   return signed.url.toString();
 }
 
-/**
- * Deletes objects, ignoring individual failures.
- *
- * DeleteObject is free on R2, so one request per key costs nothing and avoids
- * hand-rolling the batch-delete XML payload.
- */
 export async function deleteObjects(
   config: R2Config,
   keys: string[]

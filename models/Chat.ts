@@ -26,8 +26,6 @@ const chatSchema = new mongoose.Schema(
   { collection: "chats" }
 );
 
-// Compound index: covers Chat.find({ userId }).sort({ updatedAt: -1 })
-// ESR rule: Equality (userId) → Sort (updatedAt desc)
 chatSchema.index({ userId: 1, updatedAt: -1 });
 
 export type ChatDoc = InferSchemaType<typeof chatSchema>;

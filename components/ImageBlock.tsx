@@ -15,8 +15,6 @@ export default function ImageBlock({
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState<"copy" | "download" | null>(null);
 
-  // Cloudinary resizes/reformats on delivery, so we ask for exactly what the
-  // layout needs (plus a 2x variant) instead of the full-resolution original.
   const thumbnailUrl = buildCloudinaryTransform(imageUrl, "c_limit,w_520,f_auto,q_auto");
   const thumbnailUrl2x = buildCloudinaryTransform(imageUrl, "c_limit,w_1040,f_auto,q_auto");
   const fullUrl = buildCloudinaryTransform(imageUrl, "f_auto,q_auto");
@@ -61,7 +59,6 @@ export default function ImageBlock({
     }
   }, [fullUrl]);
 
-  // Escape closes the lightbox, and the page behind it shouldn't scroll.
   useEffect(() => {
     if (!showFull) return;
     const onKey = (e: KeyboardEvent) => {
@@ -84,10 +81,8 @@ export default function ImageBlock({
         aria-label="View image full size"
         className="group block w-full relative cursor-zoom-in rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700"
       >
-        {/* min-height reserves space before the image decodes, so the notes list
-            doesn't jump as images stream in. */}
+
         <div className="w-full min-h-32 max-h-80 flex items-center justify-center bg-slate-100 dark:bg-slate-800">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={thumbnailUrl}
             srcSet={`${thumbnailUrl} 1x, ${thumbnailUrl2x} 2x`}
@@ -153,7 +148,6 @@ export default function ImageBlock({
           >
             <X className="w-6 h-6" />
           </button>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={fullUrl}
             alt={caption || "Full image"}
@@ -166,14 +160,9 @@ export default function ImageBlock({
   );
 }
 
-/**
- * Insert Cloudinary transform params into an upload URL.
- * upload URL format: https://res.cloudinary.com/<cloud>/image/upload/v<version>/<public_id>.<ext>
- * We insert the transform string after "/upload/".
- */
 function buildCloudinaryTransform(url: string, transform: string): string {
   if (!url) return url;
-  // Only transform Cloudinary URLs
+
   if (!url.includes("res.cloudinary.com")) return url;
   return url.replace("/upload/", `/upload/${transform}/`);
 }

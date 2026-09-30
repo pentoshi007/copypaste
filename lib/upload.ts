@@ -1,154 +1,337 @@
 import { sendWithProgress, type ProgressCallback } from "@/lib/xhr";
+import {
+  attachmentKind,
+  MAX_FILES_PER_NOTE,
+  MAX_IMAGE_BYTES,
+  type AttachmentKind,
+  type AttachmentRef,
+} from "@/lib/attachments";
 
-/**
- * Client-side upload helpers.
- *
- * Two backends, split by content:
- *   - Images  -> Cloudinary (signed direct upload). Kept because Cloudinary
- *                resizes and re-encodes at delivery time, which R2 can't do.
- *   - Everything else -> Cloudflare R2 (presigned PUT to a private bucket).
- *
- * Both send bytes straight from the browser to the storage provider; nothing is
- * proxied through our server.
- */
-
-export const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
-
-export type UploadResult = { secure_url: string; public_id: string };
-
-export type UploadedFile = {
-  /** R2 object key. Passed back to the server when creating the note. */
-  storageKey: string;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
+export type UploadResult = AttachmentRef & {
+  id: string;
+  index: number;
+  state: "ready" | "error";
+  error: string;
 };
 
-export function isImageFile(file: File): boolean {
-  // SVG is treated as a generic file, never as an inline image: it can carry
-  // script, and Cloudinary would serve it from a hostname we don't control.
-  return file.type.startsWith("image/") && file.type !== "image/svg+xml";
+export type UploadCandidate = Pick<File, "name" | "size" | "type">;
+
+export type Rejection = { index: number; error: string };
+
+export type BatchUploadResult = {
+  uploaded: UploadResult[];
+  rejections: Rejection[];
+};
+
+export type BatchProgress = (index: number, percent: number) => void;
+
+export function splitSelection(files: UploadCandidate[]): {
+  images: UploadCandidate[];
+  others: UploadCandidate[];
+  rejections: Rejection[];
+} {
+  const images: UploadCandidate[] = [];
+  const others: UploadCandidate[] = [];
+  const rejections: Rejection[] = [];
+  let kept = 0;
+
+  for (const [index, file] of files.entries()) {
+    const kind = attachmentKind(file.type, file.name);
+
+    if (file.size === 0) {
+      rejections.push({ index, error: "That file is empty" });
+      continue;
+    }
+    if (kind === "image" && file.size > MAX_IMAGE_BYTES) {
+      rejections.push({ index, error: "Image is too large (max 10MB)" });
+      continue;
+    }
+    if (kept >= MAX_FILES_PER_NOTE) {
+      rejections.push({
+        index,
+        error: `Only the first ${MAX_FILES_PER_NOTE} files can be attached at once`,
+      });
+      continue;
+    }
+
+    kept++;
+    (kind === "image" ? images : others).push(file);
+  }
+
+  return { images, others, rejections };
 }
 
-export function validateImageFile(file: File): string | null {
-  if (!isImageFile(file)) return "That file isn't an image";
-  if (file.size > MAX_IMAGE_BYTES) return "Image is too large (max 10MB)";
-  return null;
+export async function uploadBatch(
+  files: File[],
+  onProgress: BatchProgress,
+  signal?: AbortSignal
+): Promise<BatchUploadResult> {
+  const { images, others, rejections: preflight } = splitSelection(files);
+
+  const [imageBatch, fileBatch] = await Promise.all([
+    images.length ? uploadImages(files, onProgress, signal) : null,
+    others.length ? uploadToR2(files, onProgress, signal) : null,
+  ]);
+
+  return {
+    uploaded: [
+      ...(imageBatch?.uploaded ?? []),
+      ...(fileBatch?.uploaded ?? []),
+    ].sort((a, b) => a.index - b.index),
+    rejections: [
+      ...preflight,
+      ...(imageBatch?.rejections ?? []),
+      ...(fileBatch?.rejections ?? []),
+    ].sort((a, b) => a.index - b.index),
+  };
 }
 
-// ---------------------------------------------------------------------------
-// Images -> Cloudinary
-// ---------------------------------------------------------------------------
+function indicesOfKind(files: File[], kind: AttachmentKind): number[] {
+  const out: number[] = [];
+  for (const [index, file] of files.entries()) {
+    if (attachmentKind(file.type, file.name) === kind) out.push(index);
+  }
+  return out;
+}
 
-type SignResponse = {
+type CloudinarySign = {
+  index: number;
   signature: string;
   timestamp: number;
   publicId: string;
-  apiKey: string;
-  cloudName: string;
+};
+
+type SignResponse = {
+  signs?: CloudinarySign[];
+  errors?: Rejection[];
+  apiKey?: string;
+  cloudName?: string;
   error?: string;
 };
 
-export async function uploadImage(
-  file: File,
-  onProgress?: ProgressCallback,
+async function uploadImages(
+  all: File[],
+  onProgress: BatchProgress,
   signal?: AbortSignal
-): Promise<UploadResult> {
-  // The server picks the public_id (namespaced to the signed-in user), the
-  // timestamp and the signature. The client contributes only the bytes — it
-  // can't influence where the asset lands.
-  const signRes = await fetch("/api/upload-sign", { method: "POST", signal });
-  const signed = (await signRes.json().catch(() => null)) as
-    | SignResponse
-    | null;
+): Promise<BatchUploadResult> {
+  const indices = indicesOfKind(all, "image");
+  const files = indices.map((index) => all[index]);
 
-  if (!signRes.ok || !signed?.signature) {
-    throw new Error(signed?.error ?? "Upload authorization failed");
+  const res = await fetch("/api/upload-sign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      files: files.map((f) => ({ fileName: f.name, contentType: f.type })),
+    }),
+    signal,
+  });
+  const body = (await res.json().catch(() => null)) as SignResponse | null;
+
+  if (!res.ok || !body?.apiKey || !body?.cloudName) {
+    return failAll(indices, body?.error ?? "Upload authorization failed");
   }
 
+  const { uploaded, rejections } = await transferAll(
+    (body.signs ?? []).map((sign) => ({
+      index: indices[sign.index],
+      run: putToCloudinary(
+        files[sign.index],
+        sign,
+        body.apiKey as string,
+        body.cloudName as string,
+        (percent) => onProgress(indices[sign.index], percent),
+        signal
+      ),
+    }))
+  );
+
+  return {
+    uploaded,
+    rejections: mergeByIndex(rejections, remap(body.errors ?? [], indices)),
+  };
+}
+
+async function putToCloudinary(
+  file: File,
+  sign: Omit<CloudinarySign, "index">,
+  apiKey: string,
+  cloudName: string,
+  onProgress: ProgressCallback,
+  signal?: AbortSignal
+): Promise<AttachmentRef> {
   const formData = new FormData();
   formData.append("file", file);
-  formData.append("api_key", signed.apiKey);
-  formData.append("timestamp", String(signed.timestamp));
-  formData.append("public_id", signed.publicId);
-  formData.append("signature", signed.signature);
+  formData.append("api_key", apiKey);
+  formData.append("timestamp", String(sign.timestamp));
+  formData.append("public_id", sign.publicId);
+  formData.append("signature", sign.signature);
 
   const raw = await sendWithProgress({
     method: "POST",
-    url: `https://api.cloudinary.com/v1_1/${signed.cloudName}/image/upload`,
+    url: `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
     body: formData,
     onProgress,
     signal,
   });
 
-  let parsed: UploadResult;
+  return {
+    kind: "image",
+    fileName: file.name,
+    fileSize: file.size,
+    mimeType: file.type || "application/octet-stream",
+    ...parseUploadResponse(raw),
+  };
+}
+
+function parseUploadResponse(raw: string): {
+  secure_url: string;
+  public_id: string;
+} {
+  let parsed: { secure_url?: string; public_id?: string };
   try {
-    parsed = JSON.parse(raw) as UploadResult;
+    parsed = JSON.parse(raw) as { secure_url?: string; public_id?: string };
   } catch {
     throw new Error("Could not read the upload response");
   }
   if (!parsed.secure_url || !parsed.public_id) {
     throw new Error("Upload response was incomplete");
   }
-  return parsed;
+  return { secure_url: parsed.secure_url, public_id: parsed.public_id };
 }
 
-// ---------------------------------------------------------------------------
-// Everything else -> Cloudflare R2
-// ---------------------------------------------------------------------------
-
-type PresignResponse = {
+type PresignEntry = {
+  index: number;
   key: string;
   uploadUrl: string;
   fileName: string;
   headers: Record<string, string>;
+};
+
+type PresignResponse = {
+  presigns?: PresignEntry[];
+  errors?: Rejection[];
   error?: string;
 };
 
-export async function uploadFileToR2(
-  file: File,
-  onProgress?: ProgressCallback,
+async function uploadToR2(
+  all: File[],
+  onProgress: BatchProgress,
   signal?: AbortSignal
-): Promise<UploadedFile> {
-  if (file.size === 0) throw new Error("That file is empty");
+): Promise<BatchUploadResult> {
+  const indices = indicesOfKind(all, "file");
+  const files = indices.map((index) => all[index]);
 
-  const contentType = file.type || "application/octet-stream";
-
-  // The server decides the object key, enforces the size cap and builds the
-  // headers. The client is not trusted to choose any of them.
-  const presignRes = await fetch("/api/upload-url", {
+  const res = await fetch("/api/upload-url", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      fileName: file.name,
-      contentType,
-      size: file.size,
+      files: files.map((f) => ({
+        fileName: f.name,
+        contentType: f.type,
+        size: f.size,
+      })),
     }),
     signal,
   });
+  const body = (await res.json().catch(() => null)) as PresignResponse | null;
 
-  const presign = (await presignRes.json().catch(() => null)) as
-    | PresignResponse
-    | null;
-
-  if (!presignRes.ok || !presign?.uploadUrl) {
-    throw new Error(presign?.error ?? "Upload authorization failed");
+  if (!res.ok || !body) {
+    return failAll(indices, body?.error ?? "Upload authorization failed");
   }
 
+  const { uploaded, rejections } = await transferAll(
+    (body.presigns ?? []).map((presign) => ({
+      index: indices[presign.index],
+      run: putToR2(
+        files[presign.index],
+        presign,
+        (percent) => onProgress(indices[presign.index], percent),
+        signal
+      ),
+    }))
+  );
+
+  return {
+    uploaded,
+    rejections: mergeByIndex(rejections, remap(body.errors ?? [], indices)),
+  };
+}
+
+async function putToR2(
+  file: File,
+  presign: PresignEntry,
+  onProgress: ProgressCallback,
+  signal?: AbortSignal
+): Promise<AttachmentRef> {
   await sendWithProgress({
     method: "PUT",
     url: presign.uploadUrl,
     body: file,
-    // Sent verbatim so R2 stores them as the object's system metadata.
     headers: presign.headers,
     onProgress,
     signal,
   });
 
   return {
-    storageKey: presign.key,
+    kind: "file",
     fileName: presign.fileName,
     fileSize: file.size,
-    mimeType: contentType,
+    mimeType: file.type || "application/octet-stream",
+    storageKey: presign.key,
   };
+}
+
+async function transferAll(
+  pending: { index: number; run: Promise<AttachmentRef> }[]
+): Promise<{ uploaded: UploadResult[]; rejections: Rejection[] }> {
+  const outcomes = await Promise.all(
+    pending.map(async ({ index, run }) => {
+      try {
+        return { index, ref: await run };
+      } catch (err) {
+        if ((err as Error)?.name === "AbortError") throw err;
+        return { index, error: (err as Error)?.message || "Upload failed" };
+      }
+    })
+  );
+
+  const uploaded: UploadResult[] = [];
+  const rejections: Rejection[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.ref) {
+      uploaded.push({
+        ...outcome.ref,
+        id: `${Date.now().toString(36)}-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`,
+        index: outcome.index,
+        state: "ready",
+        error: "",
+      });
+    } else if (outcome.error) {
+      rejections.push({ index: outcome.index, error: outcome.error });
+    }
+  }
+
+  return { uploaded, rejections };
+}
+
+function failAll(indices: number[], error: string): BatchUploadResult {
+  return { uploaded: [], rejections: indices.map((index) => ({ index, error })) };
+}
+
+function remap(errors: Rejection[], indices: number[]): Rejection[] {
+  return errors.map((e) => ({ index: indices[e.index], error: e.error }));
+}
+
+function mergeByIndex(...groups: Rejection[][]): Rejection[] {
+  const byIndex = new Map<number, string>();
+  for (const group of groups) {
+    for (const { index, error } of group) {
+      if (!byIndex.has(index)) byIndex.set(index, error);
+    }
+  }
+  return [...byIndex.entries()]
+    .map(([index, error]) => ({ index, error }))
+    .sort((a, b) => a.index - b.index);
 }

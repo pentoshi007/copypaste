@@ -1,9 +1,5 @@
 import type { NextAuthConfig } from "next-auth";
 
-/**
- * Edge-safe Auth.js config — imported by middleware.ts.
- * No DB / bcrypt access here (those are Node-only).
- */
 export const authConfig: NextAuthConfig = {
   pages: {
     signIn: "/login",
@@ -11,7 +7,7 @@ export const authConfig: NextAuthConfig = {
   session: {
     strategy: "jwt",
   },
-  providers: [], // defined in auth.ts (Node runtime)
+  providers: [],
   callbacks: {
     authorized({ auth, request: { nextUrl } }) {
       const isLoggedIn = !!auth?.user;
@@ -20,7 +16,7 @@ export const authConfig: NextAuthConfig = {
         nextUrl.pathname === "/login" || nextUrl.pathname === "/signup";
 
       if (isOnApp) {
-        return isLoggedIn; // redirect unauthed → /login
+        return isLoggedIn;
       }
       if (isOnAuth) {
         if (isLoggedIn) {

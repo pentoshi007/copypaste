@@ -1,9 +1,3 @@
-/**
- * Rasterises app/icon.svg into the PNG sizes a web app manifest needs.
- *
- * Run with: node scripts/generate-icons.mjs
- * Only needs re-running when the logo changes.
- */
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
@@ -12,9 +6,7 @@ const ROOT = process.cwd();
 const SRC = path.join(ROOT, "app", "icon.svg");
 const OUT = path.join(ROOT, "public", "icons");
 
-// Backdrop for maskable icons. Android crops them to a device-specific shape, so
-// the artwork must sit inside a filled square with room to spare.
-const MASK_BG = { r: 15, g: 23, b: 42, alpha: 1 }; // slate-950
+const MASK_BG = { r: 15, g: 23, b: 42, alpha: 1 };
 
 async function render(svg, size) {
   return sharp(Buffer.from(svg), { density: 384 })
@@ -27,13 +19,10 @@ async function main() {
   const svg = await readFile(SRC, "utf8");
   await mkdir(OUT, { recursive: true });
 
-  // Plain icons: artwork fills the canvas.
   for (const size of [192, 512]) {
     await writeFile(path.join(OUT, `icon-${size}.png`), await render(svg, size));
   }
 
-  // Maskable icons: artwork at 60% on a solid square, keeping it inside the
-  // safe zone (the central 80% circle) whatever shape the launcher applies.
   for (const size of [192, 512]) {
     const inner = Math.round(size * 0.6);
     const art = await render(svg, inner);
@@ -47,7 +36,6 @@ async function main() {
     await writeFile(path.join(OUT, `maskable-${size}.png`), out);
   }
 
-  // iOS home screen icon: no transparency, no mask, so pad it on a solid square.
   const appleInner = 148;
   const appleArt = await render(svg, appleInner);
   const appleOffset = Math.round((180 - appleInner) / 2);

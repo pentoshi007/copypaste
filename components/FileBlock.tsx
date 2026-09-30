@@ -22,13 +22,6 @@ import {
   TEXT_PREVIEW_MAX_BYTES,
 } from "@/lib/preview";
 
-/**
- * Picks an icon from the extension rather than the MIME type — browsers report
- * wildly inconsistent MIME types for the same file across platforms.
- *
- * Returns an element rather than a component reference so it composes cleanly
- * inside JSX without looking like a component defined during render.
- */
 function fileIcon(fileName: string, mimeType: string) {
   const ext = fileExtension(fileName);
   const className = "w-5 h-5 text-slate-500 dark:text-slate-400";
@@ -57,24 +50,13 @@ function fileIcon(fileName: string, mimeType: string) {
   return <FileIcon className={className} />;
 }
 
-/**
- * Whether this browser can display a PDF inside the page.
- *
- * Chrome on Android has no inline PDF viewer for frames — it can only render a
- * PDF as a top-level navigation — so embedding one there produces an empty or
- * blocked frame. `navigator.pdfViewerEnabled` reports this directly, which
- * beats sniffing the user agent.
- *
- * Read through useSyncExternalStore so the server render and the hydration pass
- * both assume "yes" and agree on the markup; the real answer applies after.
- */
 function subscribeNever() {
   return () => {};
 }
 
 function getPdfViewerSnapshot() {
   const nav = navigator as Navigator & { pdfViewerEnabled?: boolean };
-  // Undefined on older browsers that do embed PDFs, so only false disables it.
+
   return nav.pdfViewerEnabled !== false;
 }
 
@@ -82,7 +64,6 @@ function getPdfViewerServerSnapshot() {
   return true;
 }
 
-/** Text preview: fetched on demand, rendered as escaped text. */
 function TextPreview({ noteId }: { noteId: string }) {
   const [state, setState] = useState<{
     text: string;
@@ -164,15 +145,8 @@ export default function FileBlock({
   const officeDoc = isOfficeDocument(mimeType, fileName);
   const canPreview = !pending && kind !== "none";
 
-  // Where a PDF can't be embedded, "Preview" opens it in a new tab instead —
-  // Chrome on Android renders PDFs fine as a top-level document.
   const opensExternally = kind === "pdf" && !canEmbedPdf;
 
-  // Navigating to this route is a top-level request, so the browser handles the
-  // transfer natively: no CORS, no buffering the file through JS memory, and it
-  // works for large files. The route checks ownership before redirecting to a
-  // short-lived signed URL, and the object carries the right
-  // Content-Disposition so the original filename is preserved.
   const href = `/api/files/${noteId}`;
 
   const handleDownloadClick = useCallback(() => {
@@ -258,8 +232,7 @@ export default function FileBlock({
           )}
         </div>
 
-        {/* Previews mount only once requested. Rendering an <iframe> or <video>
-            for every attachment in a chat would fetch every file on load. */}
+
         {open && canPreview && !opensExternally && (
           <div className="border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
             {kind === "pdf" && (
@@ -267,8 +240,7 @@ export default function FileBlock({
                 <iframe
                   src={href}
                   title={fileName || "PDF preview"}
-                  // Streams straight from Cloudflare's edge with range requests,
-                  // so page 1 renders without downloading the whole document.
+
                   className="w-full h-[60vh] min-h-64 border-0 bg-slate-100 dark:bg-slate-800"
                 />
                 <div className="p-2 flex justify-end">
@@ -286,7 +258,6 @@ export default function FileBlock({
             )}
 
             {kind === "image" && (
-              /* eslint-disable-next-line @next/next/no-img-element */
               <img
                 src={href}
                 alt={fileName || "Preview"}
@@ -315,8 +286,7 @@ export default function FileBlock({
           </div>
         )}
 
-        {/* Be explicit about why Office files have no preview, rather than
-            silently showing nothing. */}
+
         {!pending && !canPreview && officeDoc && (
           <p className="px-3 pb-3 -mt-1 text-xs text-slate-400">
             Word, Excel and PowerPoint files can&apos;t be previewed in a browser

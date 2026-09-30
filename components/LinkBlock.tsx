@@ -18,8 +18,6 @@ export default function LinkBlock({ url }: { url: string }) {
     }
   };
 
-  // The URL was already validated server-side (http/https only).
-  // We render it as text + a safe anchor with rel=noopener noreferrer.
   let safeUrl = url;
   try {
     const parsed = new URL(url);
@@ -32,7 +30,7 @@ export default function LinkBlock({ url }: { url: string }) {
 
   return (
     <div className="flex items-center gap-2 group min-w-0">
-      {/* Horizontally scrollable so the full URL is reachable on mobile & desktop. */}
+      {}
       <div className="flex-1 min-w-0 overflow-x-auto no-scrollbar">
         <a
           href={safeUrl}

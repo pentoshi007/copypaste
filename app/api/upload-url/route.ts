@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { rateLimit } from "@/lib/rateLimit";
+import { attachmentKind, MAX_FILES_PER_NOTE } from "@/lib/attachments";
 import {
   MAX_FILE_BYTES,
   buildFileKey,
@@ -10,30 +11,21 @@ import {
   sanitizeFileName,
 } from "@/lib/r2";
 
-/**
- * Issues a short-lived, single-object PUT URL so the browser can upload a file
- * straight to R2. The bytes never touch this server.
- *
- * The response also carries the exact headers the client must send, so the
- * stored object ends up with the right content type and a
- * `Content-Disposition` that preserves the original filename on download.
- */
+const PRESIGN_TTL_SECONDS = 900;
 
-const PRESIGN_TTL_SECONDS = 900; // 15 minutes — enough for a large file on mobile
+const MAX_NAME_LENGTH = 255;
 
-/**
- * Types we refuse to store. These are only ever served as downloads from a
- * private bucket, but there's no reason to host executables.
- */
 const BLOCKED_TYPES = new Set([
   "application/x-msdownload",
   "application/x-msdos-program",
   "application/x-ms-installer",
   "application/vnd.microsoft.portable-executable",
+  "application/x-executable",
+  "application/x-sharedlib",
 ]);
 
 const BLOCKED_EXTENSIONS =
-  /\.(exe|msi|bat|cmd|com|scr|cpl|jar|app|dmg|pkg|deb|rpm|sh|ps1|vbs|lnk)$/i;
+  /\.(exe|msi|bat|cmd|com|scr|cpl|jar|app|dmg|pkg|deb|rpm|sh|ps1|vbs|lnk|run|so|dylib)$/i;
 
 export async function POST(request: Request) {
   const session = await auth();
@@ -49,90 +41,105 @@ export async function POST(request: Request) {
     );
   }
 
-  // Presigning costs nothing (no R2 call), but each signed URL is a potential
-  // write against the free-tier Class A allowance, so cap the burst rate.
-  const allowed = rateLimit("upload-url", session.user.id, {
-    maxAttempts: 40,
-    windowMs: 60_000,
-  });
-  if (!allowed) {
+  const raw = await request.json().catch(() => null);
+  const files = (raw as { files?: unknown } | null)?.files;
+  if (!Array.isArray(files)) {
+    return NextResponse.json(
+      { error: "Expected { files: [...] }" },
+      { status: 400 }
+    );
+  }
+  if (files.length === 0 || files.length > MAX_FILES_PER_NOTE) {
+    return NextResponse.json(
+      { error: `Select between 1 and ${MAX_FILES_PER_NOTE} files` },
+      { status: 400 }
+    );
+  }
+
+  if (
+    !rateLimit("upload-url", session.user.id, {
+      maxAttempts: MAX_FILES_PER_NOTE,
+      windowMs: 60_000,
+    })
+  ) {
     return NextResponse.json(
       { error: "Too many uploads. Please wait a moment." },
       { status: 429 }
     );
   }
 
-  let body: { fileName?: unknown; contentType?: unknown; size?: unknown };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
-  }
+  const presigns: {
+    index: number;
+    key: string;
+    uploadUrl: string;
+    fileName: string;
+    headers: Record<string, string>;
+  }[] = [];
+  const errors: { index: number; error: string }[] = [];
 
-  const rawName = typeof body.fileName === "string" ? body.fileName : "";
-  const fileName = sanitizeFileName(rawName);
-  if (!rawName.trim()) {
-    return NextResponse.json({ error: "Missing file name" }, { status: 400 });
-  }
+  for (const [index, entry] of files.entries()) {
+    const check = validateEntry(entry);
+    if ("error" in check) {
+      errors.push({ index, error: check.error });
+      continue;
+    }
 
-  const size = typeof body.size === "number" ? body.size : NaN;
-  if (!Number.isFinite(size) || size <= 0) {
-    return NextResponse.json({ error: "Invalid file size" }, { status: 400 });
-  }
-  if (size > MAX_FILE_BYTES) {
-    return NextResponse.json(
-      {
-        error: `File is too large (max ${Math.floor(
-          MAX_FILE_BYTES / (1024 * 1024)
-        )}MB)`,
-      },
-      { status: 413 }
-    );
-  }
+    const key = buildFileKey(session.user.id, check.fileName);
 
-  const contentType =
-    typeof body.contentType === "string" && body.contentType.trim()
-      ? body.contentType.trim()
-      : "application/octet-stream";
-
-  if (BLOCKED_TYPES.has(contentType) || BLOCKED_EXTENSIONS.test(fileName)) {
-    return NextResponse.json(
-      { error: "That file type isn't allowed" },
-      { status: 400 }
-    );
-  }
-
-  // Key is namespaced by the *authenticated* user id, never a client value.
-  const key = buildFileKey(session.user.id, fileName);
-
-  try {
-    const uploadUrl = await presignPut(config, key, PRESIGN_TTL_SECONDS);
-    return NextResponse.json(
-      {
+    try {
+      const uploadUrl = await presignPut(config, key, PRESIGN_TTL_SECONDS);
+      presigns.push({
+        index,
         key,
         uploadUrl,
-        fileName,
-        // The client must send these verbatim so R2 stores them as metadata.
-        //
-        // IMPORTANT: every header listed here ends up in the browser's
-        // `Access-Control-Request-Headers` preflight, and R2 rejects the
-        // preflight outright (403, no CORS headers) if any of them is missing
-        // from the bucket's `AllowedHeaders`. Adding one here without also
-        // updating the bucket policy breaks all uploads. Keep this list minimal
-        // and in sync with the CORS policy documented in the README.
+        fileName: check.fileName,
         headers: {
-          "Content-Type": contentType,
-          // inline for natively-viewable formats so they can be previewed
-          // in-app; attachment for everything else.
-          "Content-Disposition": contentDispositionFor(fileName, contentType),
+          "Content-Type": check.contentType,
+          "Content-Disposition": contentDispositionFor(
+            check.fileName,
+            check.contentType
+          ),
         },
-      },
-      { headers: { "Cache-Control": "private, no-store" } }
-    );
-  } catch {
-    return NextResponse.json(
-      { error: "Could not prepare the upload" },
-      { status: 500 }
-    );
+      });
+    } catch {
+      errors.push({ index, error: "Could not prepare the upload" });
+    }
   }
+
+  return NextResponse.json(
+    { presigns, errors },
+    { headers: { "Cache-Control": "private, no-store" } }
+  );
+}
+
+type ValidEntry = { fileName: string; contentType: string };
+
+function validateEntry(entry: unknown): ValidEntry | { error: string } {
+  const record = (entry ?? {}) as Record<string, unknown>;
+  const rawName = typeof record.fileName === "string" ? record.fileName : "";
+  if (!rawName.trim()) return { error: "Missing file name" };
+
+  const fileName = sanitizeFileName(rawName.slice(0, MAX_NAME_LENGTH));
+
+  const size = typeof record.size === "number" ? record.size : NaN;
+  if (!Number.isFinite(size) || size <= 0) return { error: "Invalid file size" };
+  if (size > MAX_FILE_BYTES) {
+    return {
+      error: `File is too large (max ${Math.floor(MAX_FILE_BYTES / (1024 * 1024))}MB)`,
+    };
+  }
+
+  const declared =
+    typeof record.contentType === "string" ? record.contentType.trim() : "";
+  const contentType = declared || "application/octet-stream";
+
+  if (BLOCKED_TYPES.has(contentType) || BLOCKED_EXTENSIONS.test(fileName)) {
+    return { error: "That file type isn't allowed" };
+  }
+
+  if (attachmentKind(contentType, fileName) !== "file") {
+    return { error: "Images are uploaded separately" };
+  }
+
+  return { fileName, contentType };
 }

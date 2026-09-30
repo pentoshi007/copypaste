@@ -14,9 +14,7 @@ export default async function AppLayout({
   }
 
   return (
-    // `app-viewport` pins this shell to the visual viewport (see globals.css)
-    // so the composer stays above the mobile keyboard instead of being pushed
-    // off-screen into a clipped, unscrollable area.
+
     <div className="app-viewport flex flex-col bg-slate-50 dark:bg-slate-950 overflow-hidden">
       <ViewportFix />
       <Header username={session.user.name ?? "user"} />

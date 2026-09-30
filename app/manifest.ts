@@ -1,13 +1,5 @@
 import type { MetadataRoute } from "next";
 
-/**
- * Web app manifest, served at /manifest.webmanifest.
- *
- * Installability needs, at minimum: HTTPS, a manifest with name and a
- * start_url, a `display` of standalone/fullscreen/minimal-ui, and both 192px
- * and 512px icons. Chromium also wants a service worker with a fetch handler
- * for the desktop install prompt — see public/sw.js.
- */
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: "/",
@@ -18,12 +10,7 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: "/",
     scope: "/",
     display: "standalone",
-    // `orientation` is deliberately omitted.
-    //
-    // Setting it — including to "any" — makes Chrome apply an explicit
-    // orientation lock, which overrides the device's own rotation lock. The
-    // installed app then rotates even when the user has rotation turned off.
-    // With the field absent no lock is applied at all, so the OS setting wins.
+
     background_color: "#0f172a",
     theme_color: "#0f172a",
     categories: ["productivity", "utilities"],
@@ -40,8 +27,7 @@ export default function manifest(): MetadataRoute.Manifest {
         type: "image/png",
         purpose: "any",
       },
-      // Separate maskable entries: Android crops icons to a device-specific
-      // shape, and a non-maskable icon gets its edges clipped.
+
       {
         src: "/icons/maskable-192.png",
         sizes: "192x192",

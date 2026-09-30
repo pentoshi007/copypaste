@@ -5,7 +5,6 @@ import { authConfig } from "./auth.config";
 import dbConnect from "@/lib/db";
 import User from "@/models/User";
 
-// Augment the session/user types with our user id
 declare module "next-auth" {
   interface Session {
     user: { id: string } & DefaultSession["user"];
@@ -41,8 +40,7 @@ export const {
 
         try {
           await dbConnect();
-          // Use .select() to exclude passwordHash from the hydrated doc —
-          // we only need _id and passwordHash for auth
+
           const user = await User.findOne(
             { username },
             { passwordHash: 1 }

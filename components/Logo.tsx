@@ -1,10 +1,5 @@
 import type { SVGProps } from "react";
 
-/**
- * CopyPaste logo — two overlapping rounded cards (copy/duplicate motif)
- * with a cursor arrow sweeping between them (paste action).
- * Modern gradient: indigo → fuchsia → orange.
- */
 export default function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg
@@ -27,21 +22,21 @@ export default function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {
         </linearGradient>
       </defs>
 
-      {/* Back card (indigo → purple) */}
+      {}
       <rect x="4" y="6" width="20" height="24" rx="4.5" fill="url(#cp-grad-a)" />
-      {/* Text lines on back card */}
+      {}
       <rect x="8" y="11" width="10" height="2" rx="1" fill="white" fillOpacity="0.55" />
       <rect x="8" y="15.5" width="12" height="2" rx="1" fill="white" fillOpacity="0.4" />
       <rect x="8" y="20" width="7" height="2" rx="1" fill="white" fillOpacity="0.3" />
 
-      {/* Front card (pink → orange) — offset up-right to show overlap */}
+      {}
       <rect x="15" y="10" width="20" height="24" rx="4.5" fill="url(#cp-grad-b)" />
-      {/* Cursor / paste arrow on front card */}
+      {}
       <path
         d="M21 16.5L29 20.5L26 22L28 25.5L26.2 26.4L24.2 22.9L21 24.5L21 16.5Z"
         fill="white"
       />
-      {/* Subtle highlight on front card top edge */}
+      {}
       <rect x="15" y="10" width="20" height="6" rx="4.5" fill="white" fillOpacity="0.08" />
     </svg>
   );

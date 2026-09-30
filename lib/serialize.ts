@@ -1,15 +1,10 @@
-import type { ChatItem, NoteItem, NoteType } from "@/lib/types";
+import type {
+  ChatItem,
+  NoteAttachment,
+  NoteItem,
+  NoteType,
+} from "@/lib/types";
 
-/**
- * Shared Mongo projections + serializers.
- *
- * The page loader and the /api/notes route must agree on exactly which fields
- * they read and how they're converted to JSON, otherwise the client's cache can
- * end up holding two differently-shaped versions of the same note.
- */
-
-// `storageKey` is deliberately absent: the client downloads through
-// /api/files/[noteId], so it never needs the raw R2 key.
 export const NOTE_PROJECTION = {
   _id: 1,
   chatId: 1,
@@ -22,6 +17,7 @@ export const NOTE_PROJECTION = {
   fileName: 1,
   fileSize: 1,
   mimeType: 1,
+  attachments: 1,
 } as const;
 
 export const CHAT_PROJECTION = {
@@ -31,11 +27,20 @@ export const CHAT_PROJECTION = {
   updatedAt: 1,
 } as const;
 
-/** Safety cap on notes returned for a single chat — the *newest* N. */
 export const NOTES_LIMIT = 500;
 
-/** Safety cap on chats returned for a single user. */
 export const CHATS_LIMIT = 200;
+
+type RawAttachment = {
+  index?: number | null;
+  kind?: string | null;
+  fileName?: string | null;
+  fileSize?: number | null;
+  mimeType?: string | null;
+  imageUrl?: string | null;
+  publicId?: string | null;
+  caption?: string | null;
+};
 
 type RawNote = {
   _id: unknown;
@@ -49,6 +54,7 @@ type RawNote = {
   fileName?: string | null;
   fileSize?: number | null;
   mimeType?: string | null;
+  attachments?: RawAttachment[] | null;
 };
 
 type RawChat = {
@@ -64,8 +70,25 @@ export function serializeDate(value: unknown): string {
   return new Date(value as string).toISOString();
 }
 
+function serializeAttachment(a: RawAttachment): NoteAttachment {
+  const kind = a.kind === "image" ? "image" : "file";
+  const attachment: NoteAttachment = {
+    index: Number(a.index ?? 0),
+    kind,
+    fileName: a.fileName ?? "",
+    fileSize: a.fileSize ?? 0,
+    mimeType: a.mimeType ?? "",
+    caption: a.caption ?? "",
+  };
+  if (kind === "image") {
+    attachment.imageUrl = a.imageUrl ?? "";
+    attachment.publicId = a.publicId ?? "";
+  }
+  return attachment;
+}
+
 export function serializeNote(n: RawNote): NoteItem {
-  return {
+  const note: NoteItem = {
     _id: String(n._id),
     chatId: String(n.chatId),
     type: (n.type ?? "text") as NoteType,
@@ -78,6 +101,10 @@ export function serializeNote(n: RawNote): NoteItem {
     fileSize: n.fileSize ?? 0,
     mimeType: n.mimeType ?? "",
   };
+  if (Array.isArray(n.attachments) && n.attachments.length > 0) {
+    note.attachments = n.attachments.map(serializeAttachment);
+  }
+  return note;
 }
 
 export function serializeChat(c: RawChat): ChatItem {

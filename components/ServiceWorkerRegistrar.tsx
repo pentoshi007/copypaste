@@ -2,14 +2,6 @@
 
 import { useEffect } from "react";
 
-/**
- * Registers the service worker so the app is installable and repeat loads hit
- * the static cache.
- *
- * Registration is deferred until after `load` so it never competes with the
- * first paint, and skipped in development where a caching worker mostly gets in
- * the way of hot reloads.
- */
 export default function ServiceWorkerRegistrar() {
   useEffect(() => {
     if (process.env.NODE_ENV !== "production") return;
@@ -17,7 +9,7 @@ export default function ServiceWorkerRegistrar() {
 
     const register = () => {
       navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {
-        // Not fatal — the app works fine without it.
+
       });
     };
 

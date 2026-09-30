@@ -6,12 +6,12 @@ import { auth } from "@/auth";
 import dbConnect from "@/lib/db";
 import Chat from "@/models/Chat";
 import Note from "@/models/Note";
-import { deleteObjects, getR2Config } from "@/lib/r2";
+import {
+  collectBlobs,
+  destroyBlobs,
+  type BlobRefs,
+} from "@/lib/attachments.server";
 import type { ChatItem } from "@/lib/types";
-
-// No `revalidatePath("/")` here — see the note in actions/notes.ts. The client
-// updates its own state from the returned chat, so invalidating the (dynamic)
-// page only added a wasted server round-trip per action.
 
 const titleSchema = z
   .string()
@@ -75,8 +75,6 @@ export async function updateChatTitle(
   try {
     await dbConnect();
 
-    // CRITICAL: scope by userId to prevent IDOR
-    // Atomic update — no need to fetch first
     const doc = await Chat.findOneAndUpdate(
       { _id: chatId, userId: session.user.id },
       { title: titleCheck.data, updatedAt: new Date() },
@@ -116,7 +114,6 @@ export async function deleteChat(
   try {
     await dbConnect();
 
-    // CRITICAL: scope by userId to prevent IDOR — use findOneAndDelete
     const chat = await Chat.findOneAndDelete(
       { _id: chatId, userId: session.user.id },
       { select: "_id" }
@@ -126,52 +123,34 @@ export async function deleteChat(
       return { error: "Chat not found" };
     }
 
-    // Collect attachment identifiers before the notes are gone.
-    const attachments = await Note.find(
+const notes = await Note.find(
       {
         chatId,
         userId: session.user.id,
-        $or: [{ publicId: { $ne: "" } }, { storageKey: { $ne: "" } }],
+        $or: [
+          { publicId: { $ne: "" } },
+          { storageKey: { $ne: "" } },
+          { "attachments.publicId": { $ne: "" } },
+          { "attachments.storageKey": { $ne: "" } },
+        ],
       },
-      { publicId: 1, storage: 1, storageKey: 1 }
+      { publicId: 1, storageKey: 1, attachments: 1 }
     ).lean();
 
-    const publicIds: string[] = [];
-    const objectKeys: string[] = [];
-    for (const note of attachments) {
-      if (note.storage === "r2" && note.storageKey) {
-        objectKeys.push(note.storageKey);
-      } else if (note.publicId) {
-        publicIds.push(note.publicId);
-      }
+    const refs: BlobRefs = { objectKeys: [], publicIds: [] };
+    for (const note of notes) {
+      const found = collectBlobs(note);
+      refs.objectKeys.push(...found.objectKeys);
+      refs.publicIds.push(...found.publicIds);
     }
+    refs.objectKeys = [...new Set(refs.objectKeys)];
+    refs.publicIds = [...new Set(refs.publicIds)];
 
-    // Delete the notes — this is what the user is waiting on.
     await Note.deleteMany({ chatId, userId: session.user.id });
 
-    // Blob cleanup runs *after* the response is flushed, so deleting a chat full
-    // of attachments no longer blocks the UI on N remote API calls.
-    if (publicIds.length > 0 || objectKeys.length > 0) {
+    if (refs.objectKeys.length > 0 || refs.publicIds.length > 0) {
       after(async () => {
-        if (objectKeys.length > 0) {
-          const config = getR2Config();
-          // DeleteObject is free on R2, so batching buys nothing but complexity.
-          if (config) await deleteObjects(config, objectKeys);
-        }
-
-        if (publicIds.length > 0) {
-          try {
-            const cloudinary = (await import("cloudinary")).default;
-            // delete_resources handles up to 100 ids per request.
-            for (let i = 0; i < publicIds.length; i += 100) {
-              await cloudinary.v2.api
-                .delete_resources(publicIds.slice(i, i + 100))
-                .catch(() => {});
-            }
-          } catch {
-            // non-fatal — Cloudinary env may not be configured in dev
-          }
-        }
+        await destroyBlobs(refs);
       });
     }
 

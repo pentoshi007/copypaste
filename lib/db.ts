@@ -14,11 +14,6 @@ if (!MONGODB_URI) {
   );
 }
 
-/**
- * Cached Mongoose connection for serverless / hot-reload safety.
- * Reuses a single connection across invocations to avoid exhausting
- * the Atlas free-tier connection pool.
- */
 async function dbConnect(): Promise<Connection> {
   const cached = global.mongoose;
 

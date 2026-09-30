@@ -1,9 +1,3 @@
-/**
- * Simple in-memory rate limiter (dev-tier).
- * Per-IP + per-username bucket: max `maxAttempts` per `windowMs`.
- * Production upgrade path: Upstash Redis / Vercel KV.
- */
-
 type Bucket = { count: number; firstAt: number; windowMs: number };
 
 const buckets = new Map<string, Bucket>();
@@ -20,7 +14,6 @@ function key(scope: string, id: string) {
   return `${scope}:${id.toLowerCase()}`;
 }
 
-/** Returns false when the caller has exhausted its allowance. */
 export function rateLimit(
   scope: string,
   id: string,
@@ -39,14 +32,13 @@ export function rateLimit(
   }
 
   if (b.count >= maxAttempts) {
-    return false; // blocked
+    return false;
   }
 
   b.count += 1;
   return true;
 }
 
-// Periodic cleanup (avoid unbounded growth in long-running server)
 if (typeof setInterval !== "undefined") {
   setInterval(() => {
     const now = Date.now();

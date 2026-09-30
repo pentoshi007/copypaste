@@ -9,6 +9,7 @@ import {
   Code2,
   File as FileIcon,
   Image as ImageIcon,
+  Images,
   Link2,
   Loader2,
   Search,
@@ -16,28 +17,23 @@ import {
   X,
 } from "lucide-react";
 
-/**
- * Search overlay.
- *
- * Mounted only while open (AppShell renders it conditionally), so closing it
- * discards all state — no reset logic needed.
- *
- * "Is a search in flight" is *derived* by comparing the current query with the
- * query the last completed response was for, rather than kept in its own state.
- * That means one state update per completed request instead of a set-on-start /
- * set-on-finish pair, and a stale response can never leave the spinner stuck.
- */
-
 const DEBOUNCE_MS = 180;
 const MIN_QUERY_LENGTH = 2;
 
 type Outcome = {
-  /** The trimmed query this outcome belongs to. */
+
   query: string;
   results: NoteItem[];
   truncated: boolean;
   error: string | null;
 };
+
+function headingFor(note: NoteItem): string | null {
+  if (note.type === "file") return note.fileName || "Attachment";
+  if (note.type !== "group") return null;
+  const names = (note.attachments ?? []).map((a) => a.fileName).filter(Boolean);
+  return names.length > 0 ? names.join(", ") : "Attachments";
+}
 
 function typeIcon(type: NoteItem["type"]) {
   const className = "w-4 h-4 shrink-0 text-slate-400";
@@ -45,10 +41,10 @@ function typeIcon(type: NoteItem["type"]) {
   if (type === "link") return <Link2 className={className} />;
   if (type === "image") return <ImageIcon className={className} />;
   if (type === "file") return <FileIcon className={className} />;
+  if (type === "group") return <Images className={className} />;
   return <Type className={className} />;
 }
 
-/** Renders a snippet with the matched runs emphasised. */
 function Snippet({ text, query }: { text: string; query: string }) {
   const { segments, clippedStart, clippedEnd } = useMemo(
     () => buildSnippet(text, query),
@@ -80,7 +76,7 @@ export default function SearchPanel({
   onClose,
   onSelectResult,
 }: {
-  /** Used to label each hit with its chat — saves a server-side join. */
+
   chats: ChatItem[];
   onClose: () => void;
   onSelectResult: (chatId: string, noteId: string) => void;
@@ -110,8 +106,6 @@ export default function SearchPanel({
     inputRef.current?.focus();
   }, []);
 
-  // Debounced fetch. Every keystroke aborts the request in flight, so a slow
-  // response for "re" can't overwrite the results for "report".
   useEffect(() => {
     if (tooShort) return;
 
@@ -181,7 +175,6 @@ export default function SearchPanel({
     }
   };
 
-  // Keep the keyboard-selected row visible. DOM-only, no state involved.
   useEffect(() => {
     listRef.current
       ?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)
@@ -199,8 +192,7 @@ export default function SearchPanel({
       aria-label="Search notes"
     >
       <div
-        // Full-bleed on phones, floating dialog from sm up. Height follows the
-        // visual-viewport variable so the keyboard can't push it off-screen.
+
         className="w-full sm:max-w-2xl flex flex-col bg-white dark:bg-slate-900 sm:rounded-2xl shadow-2xl overflow-hidden h-[var(--app-height,100dvh)] sm:h-auto sm:max-h-[70vh]"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
@@ -216,7 +208,7 @@ export default function SearchPanel({
             maxLength={100}
             enterKeyHint="search"
             autoComplete="off"
-            // text-base on mobile stops iOS Safari zooming on focus.
+
             className="flex-1 min-w-0 h-14 bg-transparent text-base sm:text-sm text-slate-900 dark:text-white placeholder-slate-400 outline-none"
             aria-label="Search query"
           />
@@ -257,9 +249,15 @@ export default function SearchPanel({
           {results.length > 0 && (
             <ul>
               {results.map((note, index) => {
-                const heading =
-                  note.type === "file" ? note.fileName || "Attachment" : null;
+                const heading = headingFor(note);
                 const body = note.content;
+                const size =
+                  note.type === "group"
+                    ? (note.attachments ?? []).reduce(
+                        (sum, a) => sum + (a.fileSize || 0),
+                        0
+                      )
+                    : note.fileSize;
 
                 return (
                   <li key={note._id}>
@@ -291,9 +289,9 @@ export default function SearchPanel({
                       {heading && (
                         <p className="text-sm font-medium text-slate-800 dark:text-slate-100 truncate">
                           <Snippet text={heading} query={trimmed} />
-                          {note.fileSize ? (
+                          {size ? (
                             <span className="ml-2 text-xs font-normal text-slate-400">
-                              {formatBytes(note.fileSize)}
+                              {formatBytes(size)}
                             </span>
                           ) : null}
                         </p>
@@ -307,8 +305,12 @@ export default function SearchPanel({
 
                       {!heading && !body && (
                         <p className="text-sm text-slate-400 italic">
-                          {note.type === "image" ? "Image" : "Attachment"} with no
-                          caption
+                          {note.type === "image"
+                            ? "Image"
+                            : note.type === "group"
+                            ? "Attachments"
+                            : "Attachment"}{" "}
+                          with no caption
                         </p>
                       )}
                     </button>

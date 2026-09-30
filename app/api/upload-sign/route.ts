@@ -1,27 +1,12 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { rateLimit } from "@/lib/rateLimit";
+import { attachmentKind, MAX_FILES_PER_NOTE } from "@/lib/attachments";
 import { v2 as cloudinary } from "cloudinary";
 
-/**
- * Authorizes a direct-to-Cloudinary image upload.
- *
- * SECURITY: this endpoint builds the parameters itself and signs only those. It
- * must never sign parameters supplied by the caller.
- *
- * An earlier version signed whatever `paramsToSign` object the client sent,
- * which made it a general-purpose signing oracle: a logged-in user could have
- * requested a signature for `public_id=<someone else's asset>` with
- * `overwrite=true` and replaced another user's image, or attached arbitrary
- * eager transformations. Generating the params server-side removes that
- * entirely.
- *
- * The generated `public_id` is namespaced under the authenticated user
- * (`u/<userId>/<random>`), which is what lets `createNote` verify that an image
- * a user claims actually belongs to them.
- */
+const MAX_NAME_LENGTH = 255;
 
-export async function POST() {
+export async function POST(request: Request) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -37,9 +22,24 @@ export async function POST() {
     );
   }
 
+  const raw = await request.json().catch(() => null);
+  const files = (raw as { files?: unknown } | null)?.files;
+  if (!Array.isArray(files)) {
+    return NextResponse.json(
+      { error: "Expected { files: [...] }" },
+      { status: 400 }
+    );
+  }
+  if (files.length === 0 || files.length > MAX_FILES_PER_NOTE) {
+    return NextResponse.json(
+      { error: `Select between 1 and ${MAX_FILES_PER_NOTE} images` },
+      { status: 400 }
+    );
+  }
+
   if (
     !rateLimit("upload-sign", session.user.id, {
-      maxAttempts: 40,
+      maxAttempts: MAX_FILES_PER_NOTE,
       windowMs: 60_000,
     })
   ) {
@@ -49,28 +49,46 @@ export async function POST() {
     );
   }
 
-  // Server-chosen, namespaced, unguessable.
-  const publicId = `u/${session.user.id}/${crypto
-    .randomUUID()
-    .replace(/-/g, "")}`;
-  const timestamp = Math.round(Date.now() / 1000);
+  const signs: {
+    index: number;
+    signature: string;
+    timestamp: number;
+    publicId: string;
+  }[] = [];
+  const errors: { index: number; error: string }[] = [];
 
-  try {
-    // Cloudinary rejects the upload if the request carries any signed parameter
-    // we didn't include here, so the client can't bolt extras on.
-    const signature = cloudinary.utils.api_sign_request(
-      { public_id: publicId, timestamp },
-      apiSecret
-    );
+  for (const [index, entry] of files.entries()) {
+    const record = (entry ?? {}) as Record<string, unknown>;
+    const fileName =
+      typeof record.fileName === "string"
+        ? record.fileName.slice(0, MAX_NAME_LENGTH)
+        : "";
+    const contentType =
+      typeof record.contentType === "string" ? record.contentType : "";
 
-    return NextResponse.json(
-      { signature, timestamp, publicId, apiKey, cloudName },
-      { headers: { "Cache-Control": "private, no-store" } }
-    );
-  } catch {
-    return NextResponse.json(
-      { error: "Failed to authorize upload" },
-      { status: 500 }
-    );
+    if (!contentType || attachmentKind(contentType, fileName) !== "image") {
+      errors.push({ index, error: "That file isn't an image" });
+      continue;
+    }
+
+    const publicId = `u/${session.user.id}/${crypto
+      .randomUUID()
+      .replace(/-/g, "")}`;
+    const timestamp = Math.round(Date.now() / 1000);
+
+    try {
+      const signature = cloudinary.utils.api_sign_request(
+        { public_id: publicId, timestamp },
+        apiSecret
+      );
+      signs.push({ index, signature, timestamp, publicId });
+    } catch {
+      errors.push({ index, error: "Failed to authorize upload" });
+    }
   }
+
+  return NextResponse.json(
+    { signs, errors, apiKey, cloudName },
+    { headers: { "Cache-Control": "private, no-store" } }
+  );
 }

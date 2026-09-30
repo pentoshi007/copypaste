@@ -4,15 +4,8 @@ import { Copy, Check } from "lucide-react";
 import { useState, lazy, Suspense } from "react";
 import { toast } from "sonner";
 
-// Loaded in its own chunk, so pages without code notes never download Prism.
 const CodeHighlighter = lazy(() => import("./CodeHighlighter"));
 
-/**
- * Unhighlighted view of the same code, styled to match the oneDark theme.
- *
- * Rendered on the server and while the highlighter chunk is still in flight, so
- * the code itself is readable immediately rather than after a JS round-trip.
- */
 function PlainCode({ content }: { content: string }) {
   return (
     <pre

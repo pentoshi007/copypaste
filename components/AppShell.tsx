@@ -1,15 +1,35 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import type { NoteItem, ChatItem, NoteDraft } from "@/lib/types";
+import type {
+  ChatItem,
+  DraftAttachment,
+  NoteAttachment,
+  NoteDraft,
+  NoteItem,
+} from "@/lib/types";
 import NoteEditor from "@/components/NoteEditor";
 import NoteView from "@/components/NoteView";
 import ChatList from "@/components/ChatList";
 import SearchPanel from "@/components/SearchPanel";
 import { createChat } from "@/actions/chats";
-import { createNote } from "@/actions/notes";
+import { createNote, createNoteGroup } from "@/actions/notes";
 import { toast } from "sonner";
 import { MessageSquare } from "lucide-react";
+
+function toRenderableAttachment(a: DraftAttachment): NoteAttachment {
+  const base = {
+    index: a.index,
+    kind: a.kind,
+    fileName: a.fileName,
+    fileSize: a.fileSize,
+    mimeType: a.mimeType,
+    caption: a.caption ?? "",
+  };
+  return a.kind === "image"
+    ? { ...base, imageUrl: a.imageUrl ?? "", publicId: a.publicId ?? "" }
+    : base;
+}
 
 function NotesSkeleton() {
   return (
@@ -46,23 +66,19 @@ export default function AppShell({
   const [searchOpen, setSearchOpen] = useState(false);
   const [highlightedNoteId, setHighlightedNoteId] = useState<string | null>(null);
 
-  // Notes already fetched, keyed by chatId. Switching back to a visited chat is
-  // then instant, and we revalidate in the background (stale-while-revalidate).
   const notesCacheRef = useRef<Map<string, NoteItem[]>>(
     new Map(initialChats[0] ? [[initialChats[0]._id, initialNotes]] : [])
   );
-  // De-dupes concurrent requests for the same chat (e.g. prefetch + click).
+
   const inFlightRef = useRef<Map<string, Promise<NoteItem[] | null>>>(new Map());
-  // The chat the user most recently asked for; stale responses are discarded.
+
   const wantedChatRef = useRef<string | null>(initialChats[0]?._id ?? null);
 
   const listRef = useRef<HTMLDivElement>(null);
-  // Set when a search result targets a note that isn't rendered yet; consumed
-  // once its chat's notes arrive.
+
   const pendingJumpRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
 
-  // ---- Scrolling -----------------------------------------------------------
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const el = listRef.current;
     if (!el) return;
@@ -75,13 +91,10 @@ export default function AppShell({
     return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   }, []);
 
-  // Land at the newest note whenever the visible chat changes.
   useEffect(() => {
     scrollToBottom();
   }, [activeChatId, notesLoading, scrollToBottom]);
 
-  // The keyboard opening shrinks the app; keep the newest note in view if the
-  // user was already at the bottom.
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -92,7 +105,6 @@ export default function AppShell({
     return () => vv.removeEventListener("resize", onResize);
   }, [isNearBottom, scrollToBottom]);
 
-  // ---- Fetching ------------------------------------------------------------
   const fetchNotes = useCallback((chatId: string) => {
     const existing = inFlightRef.current.get(chatId);
     if (existing) return existing;
@@ -128,7 +140,7 @@ export default function AppShell({
       }
 
       void fetchNotes(id).then((fresh) => {
-        // Ignore responses for a chat the user has already navigated away from.
+
         if (wantedChatRef.current !== id) return;
         if (fresh) setNotes(fresh);
         setNotesLoading(false);
@@ -146,8 +158,6 @@ export default function AppShell({
     [activeChatId, showChat]
   );
 
-  // Warm the cache on hover/touch so the chat is already loaded by the time the
-  // tap registers.
   const handlePrefetchChat = useCallback(
     (id: string) => {
       if (notesCacheRef.current.has(id) || inFlightRef.current.has(id)) return;
@@ -156,8 +166,6 @@ export default function AppShell({
     [fetchNotes]
   );
 
-  // Mirror the rendered notes into the cache so edits/deletes/rollbacks survive
-  // a chat switch. Pending (unsaved) notes are excluded.
   useEffect(() => {
     if (!activeChatId || notesLoading) return;
     notesCacheRef.current.set(
@@ -166,7 +174,6 @@ export default function AppShell({
     );
   }, [notes, activeChatId, notesLoading]);
 
-  // ---- Chat handlers -------------------------------------------------------
   const handleChatCreated = useCallback((chat: ChatItem) => {
     setChats((prev) => [chat, ...prev]);
     setActiveChatId(chat._id);
@@ -182,8 +189,6 @@ export default function AppShell({
       notesCacheRef.current.delete(id);
       inFlightRef.current.delete(id);
 
-      // Computed outside the updater — `showChat` dispatches its own state
-      // updates, which must not run inside another updater.
       const remaining = chats.filter((c) => c._id !== id);
       setChats(remaining);
 
@@ -206,7 +211,6 @@ export default function AppShell({
     setChats((prev) => prev.map((c) => (c._id === id ? { ...c, title } : c)));
   }, []);
 
-  /** Move a chat to the top of the list and optionally retitle it. */
   const bumpChat = useCallback((chatId: string, title?: string) => {
     setChats((prev) => {
       const idx = prev.findIndex((c) => c._id === chatId);
@@ -222,12 +226,6 @@ export default function AppShell({
     });
   }, []);
 
-  // ---- Note handlers -------------------------------------------------------
-  /**
-   * Optimistic send: the note is rendered the moment it's submitted, then either
-   * swapped for the saved copy or rolled back. Sending feels instant even on a
-   * slow connection.
-   */
   const handleSubmitNote = useCallback(
     async (draft: NoteDraft): Promise<boolean> => {
       let chatId = activeChatId;
@@ -262,24 +260,32 @@ export default function AppShell({
         fileName: draft.fileName ?? "",
         fileSize: draft.fileSize ?? 0,
         mimeType: draft.mimeType ?? "",
+        attachments: draft.attachments?.map(toRenderableAttachment),
         pending: true,
       };
 
       setNotes((prev) => [...prev, optimistic]);
       requestAnimationFrame(() => scrollToBottom("smooth"));
 
-      const result = await createNote({
-        chatId,
-        type: draft.type,
-        content: draft.content,
-        imageUrl: draft.imageUrl,
-        publicId: draft.publicId,
-        language: draft.language,
-        storageKey: draft.storageKey ?? "",
-        fileName: draft.fileName ?? "",
-        fileSize: draft.fileSize ?? 0,
-        mimeType: draft.mimeType ?? "",
-      });
+      const result =
+        draft.type === "group"
+          ? await createNoteGroup({
+              chatId,
+              content: draft.content,
+              attachments: draft.attachments ?? [],
+            })
+          : await createNote({
+              chatId,
+              type: draft.type,
+              content: draft.content,
+              imageUrl: draft.imageUrl,
+              publicId: draft.publicId,
+              language: draft.language,
+              storageKey: draft.storageKey ?? "",
+              fileName: draft.fileName ?? "",
+              fileSize: draft.fileSize ?? 0,
+              mimeType: draft.mimeType ?? "",
+            });
 
       if (result.error || !result.note) {
         setNotes((prev) => prev.filter((n) => n._id !== tempId));
@@ -305,10 +311,26 @@ export default function AppShell({
     );
   }, []);
 
+  const handleAttachmentCaptionChanged = useCallback(
+    (noteId: string, index: number, caption: string) => {
+      setNotes((prev) =>
+        prev.map((n) =>
+          n._id === noteId
+            ? {
+                ...n,
+                attachments: n.attachments?.map((a) =>
+                  a.index === index ? { ...a, caption } : a
+                ),
+              }
+            : n
+        )
+      );
+    },
+    []
+  );
+
   const toggleSidebar = useCallback(() => setSidebarOpen((v) => !v), []);
 
-  // ---- Search ---------------------------------------------------------------
-  /** Scrolls a rendered note into view and flashes it, so the hit is obvious. */
   const revealNote = useCallback((noteId: string) => {
     const row = listRef.current?.querySelector<HTMLElement>(
       `[data-note-id="${noteId}"]`
@@ -330,13 +352,13 @@ export default function AppShell({
   const handleSelectResult = useCallback(
     (chatId: string, noteId: string) => {
       if (chatId === activeChatId) {
-        // Already open — but wait a frame so the panel has unmounted first.
+
         requestAnimationFrame(() => {
           if (!revealNote(noteId)) pendingJumpRef.current = noteId;
         });
         return;
       }
-      // Different chat: switch, and let the effect below jump once it loads.
+
       pendingJumpRef.current = noteId;
       setSidebarOpen(false);
       showChat(chatId);
@@ -344,7 +366,6 @@ export default function AppShell({
     [activeChatId, revealNote, showChat]
   );
 
-  // Completes a pending jump as soon as the target note is on screen.
   useEffect(() => {
     const target = pendingJumpRef.current;
     if (!target || notesLoading) return;
@@ -361,7 +382,6 @@ export default function AppShell({
     };
   }, []);
 
-  // Cmd/Ctrl+K from anywhere, the convention people already expect.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -376,7 +396,6 @@ export default function AppShell({
   const openSearch = useCallback(() => setSearchOpen(true), []);
   const closeSearch = useCallback(() => setSearchOpen(false), []);
 
-  // Close the sidebar on Escape — it's a modal overlay on mobile.
   useEffect(() => {
     if (!sidebarOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -396,16 +415,23 @@ export default function AppShell({
           highlighted={note._id === highlightedNoteId}
           onDeleted={handleNoteDeleted}
           onUpdated={handleNoteUpdated}
+          onAttachmentCaptionChanged={(index, caption) =>
+            handleAttachmentCaptionChanged(note._id, index, caption)
+          }
         />
       )),
-    [notes, highlightedNoteId, handleNoteDeleted, handleNoteUpdated]
+    [
+      notes,
+      highlightedNoteId,
+      handleNoteDeleted,
+      handleNoteUpdated,
+      handleAttachmentCaptionChanged,
+    ]
   );
 
   return (
     <div className="relative flex-1 flex overflow-hidden min-h-0">
-      {/* Chat list — absolutely positioned inside the content area on mobile so
-          it tracks the app's (keyboard-adjusted) height instead of the raw
-          browser viewport. */}
+
       <aside
         className={`${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
@@ -431,7 +457,7 @@ export default function AppShell({
         />
       )}
 
-      {/* Main column — only the notes list scrolls. */}
+
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
         <div
           ref={listRef}
@@ -459,11 +485,7 @@ export default function AppShell({
           )}
         </div>
 
-        {/* Composer — pinned to the bottom of the app shell.
-            `composer-shell` caps it against the visual viewport and, as a last
-            resort, it can shrink and scroll internally rather than overflowing
-            into the clipped region below the fold. The send button shares a row
-            with the input, so it's reachable either way. */}
+
         <div className="composer-shell border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 pt-2.5 sm:px-6 sm:pt-4 pb-[calc(0.625rem+env(safe-area-inset-bottom,0px))] sm:pb-[calc(1rem+env(safe-area-inset-bottom,0px))] overflow-y-auto overscroll-none-y">
           <div className="max-w-3xl mx-auto">
             <NoteEditor
@@ -476,7 +498,7 @@ export default function AppShell({
         </div>
       </div>
 
-      {/* Mounted only while open, so closing it discards its state. */}
+
       {searchOpen && (
         <SearchPanel
           chats={chats}

@@ -6,6 +6,16 @@ import { auth } from "@/auth";
 import dbConnect from "@/lib/db";
 import Note from "@/models/Note";
 import Chat from "@/models/Chat";
+import { MAX_FILES_PER_NOTE } from "@/lib/attachments";
+import { serializeNote } from "@/lib/serialize";
+import {
+  collectBlobs,
+  destroyBlobs,
+  isCloudinaryDeliveryUrl,
+  isOwnedCloudinaryId,
+  storageKindFor,
+  verifyGroupAttachments,
+} from "@/lib/attachments.server";
 import {
   MAX_FILE_BYTES,
   deleteObjects,
@@ -16,30 +26,42 @@ import {
 } from "@/lib/r2";
 import type { NoteItem, NoteType } from "@/lib/types";
 
-/*
- * These actions deliberately do NOT call `revalidatePath("/")`.
- *
- * The page is `force-dynamic`, so there is no cached render to invalidate —
- * revalidating just forced the client to re-request a full RSC payload, which
- * re-ran auth, the DB connect and both list queries after *every* note. The
- * client already has everything it needs: each action returns the created or
- * updated entity and AppShell merges it into local state, so the round-trip
- * was pure latency.
- */
-
 const createNoteSchema = z.object({
-  chatId: z.string().length(24).regex(/^[a-f0-9]+$/i), // MongoDB ObjectId
+  chatId: z.string().length(24).regex(/^[a-f0-9]+$/i),
   type: z.enum(["text", "code", "link", "image", "file"]),
   content: z.string().max(10000, "Content too long (max 10000 chars)"),
   imageUrl: z.string().max(2048).optional().default(""),
   publicId: z.string().max(256).optional().default(""),
   language: z.string().max(50).optional().default(""),
-  // File attachments. `storageKey` is verified against the caller's namespace
-  // below; fileSize/mimeType are re-read from R2 rather than trusted.
+
   storageKey: z.string().max(512).optional().default(""),
   fileName: z.string().max(255).optional().default(""),
   fileSize: z.number().int().nonnegative().optional().default(0),
   mimeType: z.string().max(255).optional().default(""),
+});
+
+const groupAttachmentSchema = z.object({
+  kind: z.enum(["image", "file"]),
+  imageUrl: z.string().max(2048).optional().default(""),
+  publicId: z.string().max(256).optional().default(""),
+  storageKey: z.string().max(512).optional().default(""),
+  fileName: z.string().max(255).optional().default(""),
+  fileSize: z.number().int().nonnegative().optional().default(0),
+  mimeType: z.string().max(255).optional().default(""),
+  caption: z
+    .string()
+    .max(1000, "Caption too long (max 1000 chars)")
+    .optional()
+    .default(""),
+});
+
+const createNoteGroupSchema = z.object({
+  chatId: z.string().length(24).regex(/^[a-f0-9]+$/i),
+  content: z.string().max(10000, "Content too long (max 10000 chars)"),
+  attachments: z
+    .array(groupAttachmentSchema)
+    .min(1, "Attach at least one file")
+    .max(MAX_FILES_PER_NOTE),
 });
 
 export type CreateNoteResult = {
@@ -48,12 +70,8 @@ export type CreateNoteResult = {
   chatTitle?: string;
 };
 
-// Fields needed when serializing a note for the client
-// Fields needed when serializing a note back to the client.
-// `storageKey` is intentionally excluded — the client downloads through
-// /api/files/[noteId] and never needs the raw R2 key.
 const NOTE_PROJECTION =
-  "_id chatId type content imageUrl publicId language createdAt fileName fileSize mimeType";
+  "_id chatId type content imageUrl publicId language createdAt fileName fileSize mimeType attachments";
 
 export async function createNote(
   input: z.infer<typeof createNoteSchema>
@@ -72,7 +90,6 @@ export async function createNote(
   let { fileName, fileSize, mimeType } = parsed.data;
   const { storageKey } = parsed.data;
 
-  // Link type: validate URL scheme (http/https only — blocks javascript:/data:)
   if (type === "link") {
     const urlCheck = z
       .string()
@@ -91,12 +108,6 @@ export async function createNote(
       return { error: "Please enter a valid http/https URL" };
     }
   }
-
-  // --- Attachment ownership checks ----------------------------------------
-  // The browser uploads directly to Cloudinary/R2, so the identifiers it sends
-  // back are untrusted input. Both branches below confirm the asset lives in
-  // this user's namespace; without that, a user could claim someone else's
-  // asset and then read or delete it through their own note.
 
   if (type === "image") {
     if (!imageUrl || !publicId) {
@@ -119,17 +130,11 @@ export async function createNote(
       return { error: "Invalid file reference" };
     }
 
-    // Confirm the object really exists and record its true size/type instead of
-    // the client-reported values. This also stops a note being created that
-    // points at an object that was never uploaded.
     const metadata = await headObject(config, storageKey);
     if (!metadata) {
       return { error: "Upload didn't complete — please try again" };
     }
 
-    // The presigned PUT doesn't constrain body length, so the size declared at
-    // presign time is advisory. This is the real check — and the oversized
-    // object is removed rather than left behind eating the storage quota.
     if (metadata.size > MAX_FILE_BYTES) {
       after(async () => {
         await deleteObjects(config, [storageKey]);
@@ -149,10 +154,6 @@ export async function createNote(
   try {
     await dbConnect();
 
-    // CRITICAL: verify the chat belongs to this user (IDOR prevention).
-    // One round trip does double duty here — it authorises the write *and*
-    // bumps the chat's activity timestamp. `new: false` returns the document as
-    // it was, so we can still tell whether it's an untitled ("New Chat") chat.
     const chat = await Chat.findOneAndUpdate(
       { _id: chatId, userId: session.user.id },
       { updatedAt: new Date() },
@@ -164,7 +165,7 @@ export async function createNote(
     }
 
     const doc = await Note.create({
-      userId: session.user.id, // scoped to authenticated user — never trust client userId
+      userId: session.user.id,
       chatId,
       type,
       content,
@@ -178,8 +179,6 @@ export async function createNote(
       language,
     });
 
-    // Auto-title from the first note. Only the first note in a chat pays for
-    // this extra write; every later note is two round trips total.
     let chatTitle: string = chat.title;
     if (chatTitle === "New Chat") {
       chatTitle = deriveChatTitle(type, content, fileName);
@@ -211,6 +210,138 @@ export async function createNote(
   }
 }
 
+export async function createNoteGroup(
+  input: z.input<typeof createNoteGroupSchema>
+): Promise<CreateNoteResult> {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return { error: "Unauthorized" };
+  }
+
+  const parsed = createNoteGroupSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
+  }
+
+  const { chatId, content, attachments } = parsed.data;
+
+  const config = getR2Config();
+  const needsR2 = attachments.some((a) => a.kind === "file");
+  if (needsR2 && !config) {
+    return { error: "File storage isn't configured" };
+  }
+
+  const verified = await verifyGroupAttachments(
+    attachments,
+    session.user.id,
+    async (key) => (config ? headObject(config, key) : null),
+    MAX_FILE_BYTES
+  );
+
+  if (!verified.ok) {
+    if (config && verified.orphanKeys.length > 0) {
+      const keys = verified.orphanKeys;
+      after(async () => {
+        await deleteObjects(config, keys);
+      });
+    }
+    return { error: verified.error };
+  }
+
+  try {
+    await dbConnect();
+
+    const chat = await Chat.findOneAndUpdate(
+      { _id: chatId, userId: session.user.id },
+      { updatedAt: new Date() },
+      { new: false, select: "title" }
+    ).lean();
+
+    if (!chat) {
+      return { error: "Chat not found" };
+    }
+
+    const doc = await Note.create({
+      userId: session.user.id,
+      chatId,
+      type: "group",
+      content,
+      imageUrl: "",
+      publicId: "",
+      storage: storageKindFor(verified.attachments),
+      storageKey: "",
+      fileName: "",
+      fileSize: 0,
+      mimeType: "",
+      attachments: verified.attachments,
+      language: "",
+    });
+
+    let chatTitle: string = chat.title;
+    if (chatTitle === "New Chat") {
+      chatTitle = deriveChatTitle(
+        "group",
+        content,
+        verified.attachments[0]?.fileName ?? ""
+      );
+      if (chatTitle !== chat.title) {
+        await Chat.updateOne(
+          { _id: chatId, userId: session.user.id },
+          { title: chatTitle }
+        );
+      }
+    }
+
+    return { note: serializeNote(doc.toObject()), chatTitle };
+  } catch {
+    return { error: "Failed to create note" };
+  }
+}
+
+const updateAttachmentCaptionSchema = z.object({
+  noteId: z.string().length(24).regex(/^[a-f0-9]+$/i),
+  index: z.number().int().nonnegative(),
+  caption: z.string().max(1000, "Caption too long (max 1000 chars)"),
+});
+
+export async function updateAttachmentCaption(
+  input: z.infer<typeof updateAttachmentCaptionSchema>
+): Promise<CreateNoteResult> {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return { error: "Unauthorized" };
+  }
+
+  const parsed = updateAttachmentCaptionSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
+  }
+
+  const { noteId, index, caption } = parsed.data;
+
+  try {
+    await dbConnect();
+
+    const updated = await Note.findOneAndUpdate(
+      { _id: noteId, userId: session.user.id, type: "group" },
+      { $set: { [`attachments.$.caption`]: caption.trim() } },
+      {
+        new: true,
+        select: NOTE_PROJECTION,
+        arrayFilters: [{ "att.index": index }],
+      }
+    ).lean();
+
+    if (!updated) {
+      return { error: "Note not found" };
+    }
+
+    return { note: serializeNote(updated) };
+  } catch {
+    return { error: "Failed to update caption" };
+  }
+}
+
 const updateNoteSchema = z.object({
   noteId: z.string().length(24).regex(/^[a-f0-9]+$/i),
   content: z.string().max(10000, "Content too long (max 10000 chars)"),
@@ -235,8 +366,6 @@ export async function updateNote(
   try {
     await dbConnect();
 
-    // CRITICAL: scope by userId to prevent IDOR — never update by id alone
-    // Use findOne to check type for link validation (lean, minimal fields)
     const existing = await Note.findOne(
       { _id: noteId, userId: session.user.id },
       { type: 1 }
@@ -246,7 +375,6 @@ export async function updateNote(
       return { error: "Note not found" };
     }
 
-    // If it's a link, validate the URL
     if (existing.type === "link") {
       const urlCheck = z
         .string()
@@ -266,7 +394,6 @@ export async function updateNote(
       }
     }
 
-    // Single atomic update — no need to fetch, modify, then save
     const updated = await Note.findOneAndUpdate(
       { _id: noteId, userId: session.user.id },
       {
@@ -308,7 +435,6 @@ export async function deleteNote(
     return { error: "Unauthorized" };
   }
 
-  // Validate noteId format
   const idCheck = z
     .string()
     .length(24)
@@ -321,35 +447,19 @@ export async function deleteNote(
   try {
     await dbConnect();
 
-    // CRITICAL: scope by userId to prevent IDOR — use findOneAndDelete
-    // to collapse fetch + delete into a single atomic operation
     const note = await Note.findOneAndDelete(
       { _id: noteId, userId: session.user.id },
-      { select: "publicId storage storageKey" }
+      { select: "publicId storage storageKey attachments" }
     ).lean();
 
     if (!note) {
       return { error: "Note not found" };
     }
 
-    // Blob cleanup runs after the response is flushed. A bare fire-and-forget
-    // promise can be killed when the serverless invocation ends; `after()` keeps
-    // the function alive just long enough.
-    if (note.storage === "r2" && note.storageKey) {
-      const key = note.storageKey;
+    const blobs = collectBlobs(note);
+    if (blobs.objectKeys.length > 0 || blobs.publicIds.length > 0) {
       after(async () => {
-        const config = getR2Config();
-        if (config) await deleteObjects(config, [key]);
-      });
-    } else if (note.publicId) {
-      const publicId = note.publicId;
-      after(async () => {
-        try {
-          const cloudinary = (await import("cloudinary")).default;
-          await cloudinary.v2.uploader.destroy(publicId).catch(() => {});
-        } catch {
-          // non-fatal — Cloudinary env may not be configured in dev
-        }
+        await destroyBlobs(blobs);
       });
     }
 
@@ -359,31 +469,6 @@ export async function deleteNote(
   }
 }
 
-/**
- * Whether a Cloudinary public_id sits in this user's namespace.
- *
- * /api/upload-sign always generates ids as `u/<userId>/<random>`, so anything
- * outside that prefix wasn't issued to this caller. This is what prevents a user
- * from deleting (or claiming) another user's image by submitting its public_id.
- */
-function isOwnedCloudinaryId(publicId: string, userId: string): boolean {
-  if (!publicId || publicId.includes("..")) return false;
-  return publicId.startsWith(`u/${userId}/`);
-}
-
-/** Only accept Cloudinary's own delivery host, over TLS. */
-function isCloudinaryDeliveryUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return (
-      parsed.protocol === "https:" && parsed.hostname === "res.cloudinary.com"
-    );
-  } catch {
-    return false;
-  }
-}
-
-/** Names a brand-new chat after its first note. */
 function deriveChatTitle(
   type: NoteType,
   content: string,
@@ -391,6 +476,7 @@ function deriveChatTitle(
 ): string {
   const trimmed = content.trim();
   if (type === "image") return trimmed || "Image";
+  if (type === "group") return trimmed || fileName || "Attachments";
   if (type === "file") return trimmed || fileName || "File";
   if (!trimmed) return "New Chat";
   return trimmed.length > 50 ? `${trimmed.slice(0, 47)}...` : trimmed;

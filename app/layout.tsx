@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
   display: "swap",
-  // Mono is only used inside code/textarea, so don't block first paint on it.
+
   preload: false,
 });
 
@@ -32,8 +32,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     title: "CopyPaste",
-    // Lets the app paint behind the status bar when installed on iOS, which is
-    // what makes the safe-area insets below meaningful.
+
     statusBarStyle: "black-translucent",
   },
   formatDetection: { telephone: false },
@@ -42,14 +41,9 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  // Required for env(safe-area-inset-*) to report anything but zero. Without it
-  // the composer's safe-area padding is a no-op and, once installed as a PWA,
-  // the send button sits under the iOS home indicator.
+
   viewportFit: "cover",
-  // Tell mobile browsers to shrink the *layout* viewport when the software
-  // keyboard opens instead of overlaying it. Without this, the bottom of the
-  // app (the composer's send button) ends up underneath the keyboard and,
-  // because the shell uses overflow:hidden, can't be scrolled into view.
+
   interactiveWidget: "resizes-content",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
@@ -57,9 +51,6 @@ export const viewport: Viewport = {
   ],
 };
 
-// Applies the persisted theme before first paint to avoid a flash of the
-// wrong colour scheme. Inlined (rather than next/script) so it runs
-// synchronously with zero extra runtime.
 const themeScript = `(function(){try{var t=localStorage.getItem('theme');if(t==='dark'||(!t&&window.matchMedia('(prefers-color-scheme: dark)').matches)){document.documentElement.classList.add('dark');}}catch(e){}})();`;
 
 export default function RootLayout({
@@ -74,7 +65,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <head>
-        {/* Warm up the DNS/TLS handshake for image delivery before any <img> is parsed. */}
+
         <link rel="preconnect" href="https://res.cloudinary.com" crossOrigin="" />
         <link rel="dns-prefetch" href="https://res.cloudinary.com" />
       </head>

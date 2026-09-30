@@ -22,18 +22,6 @@ const credentialsSchema = z.object({
 
 export type AuthState = { error?: string; ok?: boolean };
 
-/**
- * Best-effort client IP for rate limiting.
- *
- * Order matters. `x-forwarded-for` is attacker-controllable — a client can send
- * its own value, and reading the leftmost entry first meant an attacker could
- * rotate that header to get a fresh rate-limit bucket per request. Platform
- * headers are checked first because the edge sets them and strips any inbound
- * copy; `x-forwarded-for` is only a last resort.
- *
- * Brute-force protection doesn't rest on this alone: attempts are also bucketed
- * per username, which no header can change.
- */
 async function getIp(): Promise<string> {
   const h = await headers();
   return (
@@ -90,10 +78,7 @@ export async function signupAction(
 
     return { ok: true };
   } catch (err) {
-    // The check-then-create above has a race: two simultaneous signups for the
-    // same name can both pass it. The unique index on `username` is the actual
-    // guarantee, so surface its duplicate-key error as the real reason rather
-    // than a generic failure.
+
     if (isDuplicateKeyError(err)) {
       return { error: "Username already taken" };
     }
@@ -143,7 +128,7 @@ export async function loginAction(
     });
     return { ok: true };
   } catch {
-    // Same error for bad username vs bad password — no enumeration
+
     return { error: "Invalid username or password" };
   }
 }

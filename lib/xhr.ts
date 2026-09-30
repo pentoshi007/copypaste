@@ -1,25 +1,15 @@
-/**
- * Upload transport with progress reporting.
- *
- * `fetch` still cannot report request-upload progress. On a mobile connection
- * the upload is by far the longest part of sending an attachment, and without
- * progress the UI just looks frozen. XMLHttpRequest exposes
- * `upload.onprogress`, so it's used for uploads only.
- */
-
 export type ProgressCallback = (percent: number) => void;
 
 export type SendOptions = {
   method: "POST" | "PUT";
   url: string;
   body: Blob | FormData;
-  /** Sent verbatim. Do not set forbidden headers (Content-Length, Host, ...). */
+
   headers?: Record<string, string>;
   onProgress?: ProgressCallback;
   signal?: AbortSignal;
 };
 
-/** Resolves with the raw response body on 2xx, rejects otherwise. */
 export function sendWithProgress(options: SendOptions): Promise<string> {
   const { method, url, body, headers, onProgress, signal } = options;
 
@@ -35,7 +25,7 @@ export function sendWithProgress(options: SendOptions): Promise<string> {
     if (onProgress) {
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) {
-          // Hold at 99 until the server actually confirms.
+
           onProgress(
             Math.min(99, Math.round((event.loaded / event.total) * 100))
           );

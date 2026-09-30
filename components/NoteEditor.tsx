@@ -8,14 +8,13 @@ import {
   useLayoutEffect,
 } from "react";
 import { useDropzone } from "react-dropzone";
-import type { NoteDraft, NoteType } from "@/lib/types";
-import {
-  isImageFile,
-  uploadFileToR2,
-  uploadImage,
-  validateImageFile,
-} from "@/lib/upload";
-import { formatBytes } from "@/lib/format";
+import type { DraftAttachment, NoteDraft, NoteType } from "@/lib/types";
+import { MAX_FILES_PER_NOTE, attachmentKind } from "@/lib/attachments";
+import { splitSelection, uploadBatch, type UploadResult } from "@/lib/upload";
+import AttachmentTray, {
+  trayFromUpload,
+  type TrayItem,
+} from "./AttachmentTray";
 import { toast } from "sonner";
 import {
   Type,
@@ -24,13 +23,10 @@ import {
   Send,
   Loader2,
   Paperclip,
-  File as FileIcon,
   Search,
-  X,
   MessagesSquare,
 } from "lucide-react";
 
-/** Types the user picks explicitly. "image"/"file" come from attaching something. */
 const TYPE_OPTIONS: { value: NoteType; label: string; icon: typeof Type }[] = [
   { value: "text", label: "Text", icon: Type },
   { value: "code", label: "Code", icon: Code2 },
@@ -61,26 +57,16 @@ const LANGUAGES = [
   "markdown",
 ];
 
-/**
- * A pending attachment.
- *
- * Images go to Cloudinary (which resizes at delivery time); everything else goes
- * to Cloudflare R2. `ready` flips once the bytes are stored and we have the
- * identifier we need to save the note.
- */
-type Attachment = {
-  kind: "image" | "file";
-  name: string;
-  size: number;
-  mimeType: string;
-  /** Local object URL — images only, for an instant preview. */
+const UPLOAD_CONCURRENCY = 3;
+
+type Pending = {
+  id: string;
+  file: File;
   previewUrl: string;
-  ready: boolean;
-  // Cloudinary (images)
-  imageUrl: string;
-  publicId: string;
-  // R2 (files)
-  storageKey: string;
+  result?: UploadResult;
+  state: "uploading" | "ready" | "error";
+  progress: number;
+  error: string;
 };
 
 export default function NoteEditor({
@@ -89,7 +75,6 @@ export default function NoteEditor({
   onOpenSearch,
   sidebarOpen = false,
 }: {
-  /** Resolves true when the note was accepted, false when it failed. */
   onSubmitNote: (draft: NoteDraft) => Promise<boolean>;
   onToggleSidebar?: () => void;
   onOpenSearch?: () => void;
@@ -98,35 +83,34 @@ export default function NoteEditor({
   const [type, setType] = useState<NoteType>("text");
   const [content, setContent] = useState("");
   const [language, setLanguage] = useState("plaintext");
-  const [attachment, setAttachment] = useState<Attachment | null>(null);
+  const [pending, setPending] = useState<Pending[]>([]);
   const [isSaving, setIsSaving] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const captionRef = useRef<HTMLInputElement>(null);
-  // Object URLs must be revoked or they hold the whole file buffer in memory.
-  const objectUrlRef = useRef<string>("");
-  const abortRef = useRef<AbortController | null>(null);
+  const controllersRef = useRef<Map<string, AbortController>>(new Map());
+  const pendingCountRef = useRef(0);
+  pendingCountRef.current = pending.length;
 
-  const releaseObjectUrl = useCallback(() => {
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = "";
-    }
+  const releasePreviews = useCallback((ids: string[]) => {
+    const drop = new Set(ids);
+    setPending((prev) => {
+      for (const item of prev) {
+        if (item.previewUrl && drop.has(item.id)) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      }
+      return prev;
+    });
   }, []);
 
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-    };
+  const abortAll = useCallback(() => {
+    for (const controller of controllersRef.current.values()) controller.abort();
+    controllersRef.current.clear();
   }, []);
 
-  // --- Auto-growing textarea -------------------------------------------------
-  // Height follows content up to a CSS max-height (see className), after which
-  // the textarea scrolls internally. This keeps the composer — and therefore
-  // the send button — inside the viewport no matter how much is typed.
+  useEffect(() => abortAll, [abortAll]);
+
   const resizeTextarea = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -136,27 +120,26 @@ export default function NoteEditor({
 
   useLayoutEffect(() => {
     resizeTextarea();
-  }, [content, attachment, resizeTextarea]);
+  }, [content, pending.length, resizeTextarea]);
 
-  const clearAttachment = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    releaseObjectUrl();
-    setAttachment(null);
-    setProgress(0);
-    setIsUploading(false);
-  }, [releaseObjectUrl]);
+  const clearPending = useCallback(
+    (ids: string[]) => {
+      for (const id of ids) controllersRef.current.get(id)?.abort();
+      for (const id of ids) controllersRef.current.delete(id);
+      releasePreviews(ids);
+      setPending((prev) => prev.filter((item) => !ids.includes(item.id)));
+    },
+    [releasePreviews]
+  );
 
   const reset = useCallback(() => {
     setContent("");
-    releaseObjectUrl();
-    setAttachment(null);
-    setProgress(0);
+    releasePreviews(pending.map((item) => item.id));
+    setPending([]);
     setLanguage("plaintext");
     setType("text");
-  }, [releaseObjectUrl]);
+  }, [pending, releasePreviews]);
 
-  // Auto-switch to the link type when the whole field is a single URL.
   const handleContentChange = (val: string) => {
     setContent(val);
     if (
@@ -168,179 +151,171 @@ export default function NoteEditor({
     }
   };
 
-  // --- Upload ---------------------------------------------------------------
-  const attachFile = useCallback(
-    async (file: File) => {
-      const asImage = isImageFile(file);
+  const addItems = useCallback((items: Pending[]) => {
+    setPending((prev) => [...prev, ...items]);
+  }, []);
 
-      if (asImage) {
-        const invalid = validateImageFile(file);
-        if (invalid) {
-          toast.error(invalid);
-          return;
+  const uploadOne = useCallback(async (item: Pending) => {
+    const controller = new AbortController();
+    controllersRef.current.set(item.id, controller);
+
+    setPending((prev) =>
+      prev.map((p) =>
+        p.id === item.id
+          ? { ...p, state: "uploading", progress: 0, error: "" }
+          : p
+      )
+    );
+
+    try {
+      const batch = await uploadBatch(
+        [item.file],
+        (_index, percent) => {
+          setPending((prev) =>
+            prev.map((p) => (p.id === item.id ? { ...p, progress: percent } : p))
+          );
+        },
+        controller.signal
+      );
+
+      const rejection = batch.rejections[0];
+      if (rejection) throw new Error(rejection.error);
+
+      const result = batch.uploaded[0];
+      if (!result) throw new Error("Upload failed");
+
+      setPending((prev) =>
+        prev.map((p) =>
+          p.id === item.id
+            ? { ...p, result, state: "ready", progress: 100, error: "" }
+            : p
+        )
+      );
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
+      setPending((prev) =>
+        prev.map((p) =>
+          p.id === item.id
+            ? {
+                ...p,
+                state: "error",
+                error: (err as Error)?.message || "Upload failed",
+              }
+            : p
+        )
+      );
+    } finally {
+      controllersRef.current.delete(item.id);
+    }
+  }, []);
+
+  const runPool = useCallback(
+    async (queue: Pending[]) => {
+      const waiting = [...queue];
+      const workers = Array.from(
+        { length: Math.min(UPLOAD_CONCURRENCY, waiting.length) },
+        async () => {
+          for (let item = waiting.shift(); item; item = waiting.shift()) {
+            await uploadOne(item);
+          }
         }
-      } else if (file.size === 0) {
-        toast.error("That file is empty");
+      );
+      await Promise.all(workers);
+    },
+    [uploadOne]
+  );
+
+  const attachFiles = useCallback(
+    (files: File[]) => {
+      if (files.length === 0) return;
+
+      const room = MAX_FILES_PER_NOTE - pendingCountRef.current;
+      if (room <= 0) {
+        toast.error(`You can attach up to ${MAX_FILES_PER_NOTE} files`);
         return;
       }
-
-      // Show the attachment immediately — before a single byte has left the
-      // device — so sending feels responsive on slow connections.
-      releaseObjectUrl();
-      const previewUrl = asImage ? URL.createObjectURL(file) : "";
-      if (previewUrl) objectUrlRef.current = previewUrl;
-
-      setAttachment({
-        kind: asImage ? "image" : "file",
-        name: file.name,
-        size: file.size,
-        mimeType: file.type || "application/octet-stream",
-        previewUrl,
-        ready: false,
-        imageUrl: "",
-        publicId: "",
-        storageKey: "",
-      });
-      setProgress(0);
-      setIsUploading(true);
-
-      const controller = new AbortController();
-      abortRef.current = controller;
-
-      try {
-        if (asImage) {
-          const result = await uploadImage(file, setProgress, controller.signal);
-          setAttachment((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  ready: true,
-                  imageUrl: result.secure_url,
-                  publicId: result.public_id,
-                }
-              : prev
-          );
-        } else {
-          const result = await uploadFileToR2(
-            file,
-            setProgress,
-            controller.signal
-          );
-          setAttachment((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  ready: true,
-                  storageKey: result.storageKey,
-                  name: result.fileName,
-                  size: result.fileSize,
-                  mimeType: result.mimeType,
-                }
-              : prev
-          );
-        }
-
-        // Move focus to the caption so the next keystroke lands somewhere useful.
-        requestAnimationFrame(() => captionRef.current?.focus());
-      } catch (err) {
-        if ((err as Error)?.name === "AbortError") return; // user cancelled
-        toast.error((err as Error)?.message || "Upload failed");
-        clearAttachment();
-      } finally {
-        if (abortRef.current === controller) abortRef.current = null;
-        setIsUploading(false);
+      const accepted = files.slice(0, room);
+      if (files.length > room) {
+        toast.error(`Only the first ${MAX_FILES_PER_NOTE} files can be attached`);
       }
+
+      const { rejections } = splitSelection(accepted);
+      const rejected = new Set(rejections.map((r) => r.index));
+      for (const r of rejections) toast.error(r.error);
+      const usable = accepted.filter((_, i) => !rejected.has(i));
+      if (usable.length === 0) return;
+
+      const added: Pending[] = usable.map((file) => ({
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        file,
+        previewUrl:
+          attachmentKind(file.type, file.name) === "image"
+            ? URL.createObjectURL(file)
+            : "",
+        state: "uploading",
+        progress: 0,
+        error: "",
+      }));
+
+      addItems(added);
+      requestAnimationFrame(() => captionRef.current?.focus());
+      void runPool(added);
     },
-    [clearAttachment, releaseObjectUrl]
+    [addItems, runPool]
   );
 
-  // Paste anywhere in the composer — including the caption field.
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      for (const item of items) {
-        if (item.kind === "file") {
-          const file = item.getAsFile();
-          if (!file) continue;
-          e.preventDefault();
-          void attachFile(file);
-          return;
-        }
-      }
+      const files = Array.from(e.clipboardData?.items ?? [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+      if (files.length === 0) return;
+      e.preventDefault();
+      attachFiles(files);
     },
-    [attachFile]
-  );
-
-  const onDrop = useCallback(
-    (acceptedFiles: File[]) => {
-      const file = acceptedFiles[0];
-      if (file) void attachFile(file);
-    },
-    [attachFile]
+    [attachFiles]
   );
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
-    onDrop,
-    // Any file type — images route to Cloudinary, everything else to R2.
-    multiple: false,
+    onDrop: attachFiles,
+    multiple: true,
     noClick: true,
     noKeyboard: true,
   });
 
-  // --- Submit ---------------------------------------------------------------
-  const effectiveType: NoteType = attachment ? attachment.kind : type;
-  const hasAttachment = attachment !== null;
-  const canSend = hasAttachment
-    ? attachment.ready && !isUploading
-    : content.trim().length > 0;
+  const items = pending.map(toTrayItem);
+  const readyItems = items.filter((item) => item.state === "ready");
+  const busyItems = items.filter((item) => item.state === "uploading");
+  const failedItems = items.filter((item) => item.state === "error");
+  const hasAttachments = items.length > 0;
+
+  const canSend =
+    items.length > 0
+      ? busyItems.length === 0 && readyItems.length > 0
+      : content.trim().length > 0;
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (isSaving || isUploading) return;
+    if (isSaving) return;
 
-    if (attachment && !attachment.ready) {
-      toast.error("Wait for the upload to finish");
+    if (busyItems.length > 0) {
+      toast.error("Wait for the uploads to finish");
       return;
     }
-    if (!attachment && !content.trim()) return;
+    if (!hasAttachments && !content.trim()) return;
 
-    const draft: NoteDraft = attachment
-      ? attachment.kind === "image"
-        ? {
-            type: "image",
-            content,
-            imageUrl: attachment.imageUrl,
-            publicId: attachment.publicId,
-            language: "",
-          }
-        : {
-            type: "file",
-            content,
-            imageUrl: "",
-            publicId: "",
-            language: "",
-            storageKey: attachment.storageKey,
-            fileName: attachment.name,
-            fileSize: attachment.size,
-            mimeType: attachment.mimeType,
-          }
-      : {
-          type,
-          content: content.trim(),
-          imageUrl: "",
-          publicId: "",
-          language: type === "code" ? language : "",
-        };
+    const draft: NoteDraft = buildDraft(readyItems, content, type, language);
 
     setIsSaving(true);
-    const focusTarget = attachment ? captionRef.current : textareaRef.current;
+    const focusTarget = hasAttachments
+      ? captionRef.current
+      : textareaRef.current;
     const hadFocus = document.activeElement === focusTarget;
     try {
       const ok = await onSubmitNote(draft);
       if (ok) {
         reset();
-        // Keep the keyboard up so the user can fire off another note.
         if (hadFocus) requestAnimationFrame(() => textareaRef.current?.focus());
       }
     } finally {
@@ -355,7 +330,13 @@ export default function NoteEditor({
     }
   };
 
-  const busy = isSaving || isUploading;
+  const retry = useCallback(
+    (id: string) => {
+      const item = pending.find((p) => p.id === id);
+      if (item) void uploadOne(item);
+    },
+    [pending, uploadOne]
+  );
 
   return (
     <div {...getRootProps()} onPaste={handlePaste} className="relative">
@@ -364,14 +345,12 @@ export default function NoteEditor({
       {isDragActive && (
         <div className="absolute inset-0 z-10 rounded-xl border-2 border-dashed border-blue-500 bg-blue-50/95 dark:bg-blue-950/80 flex items-center justify-center pointer-events-none">
           <p className="text-blue-600 dark:text-blue-400 font-medium text-sm">
-            Drop a file to attach
+            Drop files to attach
           </p>
         </div>
       )}
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-        {/* Toolbar — single line, scrolls sideways instead of wrapping so the
-            composer's height stays predictable on narrow screens. */}
         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar -mx-0.5 px-0.5">
           {onToggleSidebar && (
             <button
@@ -386,7 +365,6 @@ export default function NoteEditor({
             </button>
           )}
 
-          {/* Mobile-only: on desktop the sidebar already has a search field. */}
           {onOpenSearch && (
             <button
               type="button"
@@ -403,12 +381,12 @@ export default function NoteEditor({
               key={value}
               type="button"
               onClick={() => {
-                if (hasAttachment) clearAttachment();
+                if (hasAttachments) clearPending(items.map((i) => i.id));
                 setType(value);
               }}
-              aria-pressed={effectiveType === value}
+              aria-pressed={type === value && !hasAttachments}
               className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${
-                effectiveType === value
+                type === value && !hasAttachments
                   ? "bg-blue-600 text-white"
                   : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
               }`}
@@ -421,19 +399,21 @@ export default function NoteEditor({
           <button
             type="button"
             onClick={() => open()}
-            disabled={isUploading}
-            aria-label="Attach a file"
-            className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition disabled:opacity-50 ${
-              hasAttachment
+            aria-label="Attach files"
+            className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${
+              hasAttachments
                 ? "bg-blue-600 text-white"
                 : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
             }`}
           >
             <Paperclip className="w-4 h-4" />
-            File
+            Files
+            {items.length > 0 && (
+              <span className="text-xs opacity-80">{items.length}</span>
+            )}
           </button>
 
-          {effectiveType === "code" && (
+          {type === "code" && !hasAttachments && (
             <select
               value={language}
               onChange={(e) => setLanguage(e.target.value)}
@@ -449,74 +429,14 @@ export default function NoteEditor({
           )}
         </div>
 
-        {/* Attachment chip — fixed 48px tall so attaching something barely
-            changes the composer's height. */}
-        {attachment && (
-          <div className="flex items-center gap-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 p-2">
-            <div className="relative w-12 h-12 shrink-0 rounded-md overflow-hidden bg-slate-200 dark:bg-slate-700 flex items-center justify-center">
-              {attachment.previewUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={attachment.previewUrl}
-                  alt=""
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <FileIcon className="w-5 h-5 text-slate-500 dark:text-slate-400" />
-              )}
-              {isUploading && (
-                <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                  <Loader2 className="w-4 h-4 text-white animate-spin" />
-                </div>
-              )}
-            </div>
+        <AttachmentTray
+          items={items}
+          onRemove={(id) => clearPending([id])}
+          onRetry={retry}
+        />
 
-            <div className="min-w-0 flex-1">
-              <p
-                className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate"
-                title={attachment.name}
-              >
-                {attachment.name || "Attachment"}
-              </p>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {isUploading
-                  ? `Uploading… ${progress}%`
-                  : attachment.ready
-                  ? `${formatBytes(attachment.size)} · ready`
-                  : formatBytes(attachment.size)}
-              </p>
-              {isUploading && (
-                <div
-                  className="mt-1 h-1 w-full rounded-full bg-slate-300 dark:bg-slate-600 overflow-hidden"
-                  role="progressbar"
-                  aria-valuenow={progress}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label="Upload progress"
-                >
-                  <div
-                    className="h-full bg-blue-600 transition-[width] duration-150"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={clearAttachment}
-              aria-label={isUploading ? "Cancel upload" : "Remove attachment"}
-              className="shrink-0 p-1.5 rounded-md text-slate-500 hover:text-red-500 hover:bg-white dark:hover:bg-slate-700 transition"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        )}
-
-        {/* Input + send share one row, so the send button is always on screen
-            regardless of attachments or how tall the input grows. */}
         <div className="flex items-end gap-2">
-          {hasAttachment ? (
+          {hasAttachments ? (
             <input
               ref={captionRef}
               type="text"
@@ -525,7 +445,7 @@ export default function NoteEditor({
               enterKeyHint="send"
               maxLength={10000}
               className="flex-1 min-w-0 h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-base sm:text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-              placeholder="Add a caption (optional)…"
+              placeholder="Caption the whole group (optional)…"
             />
           ) : (
             <textarea
@@ -535,8 +455,6 @@ export default function NoteEditor({
               onKeyDown={handleKeyDown}
               rows={1}
               maxLength={10000}
-              // text-base on mobile: anything under 16px makes iOS Safari zoom
-              // in on focus, which knocks the layout sideways.
               className="composer-input flex-1 min-w-0 px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-base sm:text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition resize-none overflow-y-auto font-mono leading-relaxed"
               placeholder={
                 type === "code"
@@ -550,7 +468,7 @@ export default function NoteEditor({
 
           <button
             type="submit"
-            disabled={busy || !canSend}
+            disabled={isSaving || !canSend}
             aria-label="Send note"
             className="shrink-0 h-11 w-11 sm:w-auto sm:px-4 flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium text-sm transition"
           >
@@ -566,9 +484,64 @@ export default function NoteEditor({
         </div>
 
         <p className="hidden sm:block text-xs text-slate-400">
-          ⌘/Ctrl + Enter to send · paste or drag a file to attach
+          ⌘/Ctrl + Enter to send · paste or drop files to attach a group
+          {failedItems.length > 0 && ` · ${failedItems.length} failed`}
         </p>
       </form>
     </div>
   );
+}
+
+function toTrayItem(item: Pending): TrayItem {
+  if (item.result) return trayFromUpload(item.result, item.previewUrl);
+  return {
+    id: item.id,
+    index: 0,
+    kind: attachmentKind(item.file.type, item.file.name),
+    fileName: item.file.name,
+    fileSize: item.file.size,
+    mimeType: item.file.type || "application/octet-stream",
+    previewUrl: item.previewUrl,
+    state: item.state,
+    progress: item.progress,
+    error: item.error,
+  };
+}
+
+function buildDraft(
+  ready: TrayItem[],
+  content: string,
+  type: NoteType,
+  language: string
+): NoteDraft {
+  if (ready.length === 0) {
+    return {
+      type,
+      content: content.trim(),
+      imageUrl: "",
+      publicId: "",
+      language: type === "code" ? language : "",
+    };
+  }
+
+  const attachments: DraftAttachment[] = ready.map((item, index) => ({
+    index,
+    kind: item.kind,
+    fileName: item.fileName,
+    fileSize: item.fileSize,
+    mimeType: item.mimeType,
+    caption: "",
+    ...(item.kind === "image"
+      ? { imageUrl: item.imageUrl, publicId: item.publicId }
+      : { storageKey: item.storageKey }),
+  }));
+
+  return {
+    type: "group",
+    content,
+    imageUrl: "",
+    publicId: "",
+    language: "",
+    attachments,
+  };
 }

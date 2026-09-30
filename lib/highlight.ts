@@ -1,24 +1,15 @@
-/** A run of text, flagged if it matches the search query. */
 export type Segment = { text: string; match: boolean };
 
 export type Snippet = {
   segments: Segment[];
-  /** True when text was trimmed from the front, so the UI can prefix an ellipsis. */
+
   clippedStart: boolean;
   clippedEnd: boolean;
 };
 
-const LEAD = 40; // characters of context before the first match
-const TRAIL = 140; // characters after it
+const LEAD = 40;
+const TRAIL = 140;
 
-/**
- * Builds a preview of `text` centred on the first occurrence of `query`, split
- * into matched and unmatched runs.
- *
- * Returning segments rather than an HTML string keeps this safe: the caller
- * renders each run as a text node, so note content can never be interpreted as
- * markup no matter what a user pasted.
- */
 export function buildSnippet(text: string, query: string): Snippet {
   const source = text ?? "";
   const needle = query.trim();
@@ -35,7 +26,6 @@ export function buildSnippet(text: string, query: string): Snippet {
   const lowerNeedle = needle.toLowerCase();
   const first = haystack.indexOf(lowerNeedle);
 
-  // No match (e.g. the hit was in the filename, not the body): show the opening.
   const start = first === -1 ? 0 : Math.max(0, first - LEAD);
   const end =
     first === -1

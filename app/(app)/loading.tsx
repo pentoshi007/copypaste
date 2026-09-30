@@ -1,7 +1,7 @@
 export default function Loading() {
   return (
     <div className="flex-1 flex overflow-hidden">
-      {/* Sidebar skeleton */}
+      {}
       <aside className="hidden lg:block w-72 shrink-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-2 space-y-2">
         <div className="h-8 bg-slate-100 dark:bg-slate-800 rounded animate-pulse" />
         {[...Array(5)].map((_, i) => (
@@ -13,7 +13,7 @@ export default function Loading() {
         ))}
       </aside>
 
-      {/* Main content skeleton */}
+
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="flex-1 p-4 sm:p-6">
           <div className="max-w-3xl mx-auto space-y-3">
