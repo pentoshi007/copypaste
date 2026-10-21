@@ -1,47 +1,126 @@
-import type { AttachmentRef } from "@/lib/attachments";
+import type { AttachmentKind } from "@/lib/attachments";
+import type { BlockColor, BlockType } from "@/lib/editor/blockTypes";
 
-export type NoteType = "text" | "code" | "link" | "image" | "file" | "group";
+export type { BlockColor, BlockType } from "@/lib/editor/blockTypes";
 
-export interface NoteAttachment extends Omit<AttachmentRef, "storageKey"> {
+export interface BlockAttachment {
   index: number;
+  kind: AttachmentKind;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  caption: string;
+  imageUrl?: string;
+  publicId?: string;
 }
 
-export interface NoteItem {
+export interface Block {
   _id: string;
-  chatId: string;
-  type: NoteType;
+  pageId: string;
+  type: BlockType;
   content: string;
+  language: string;
+  position: number;
+  indent: number;
+  checked: boolean;
+  collapsed: boolean;
+  color: BlockColor;
   imageUrl: string;
   publicId: string;
-  language: string;
-  createdAt: string;
-  fileName?: string;
-  fileSize?: number;
-  mimeType?: string;
-  attachments?: NoteAttachment[];
-  pending?: boolean;
-}
-
-export interface ChatItem {
-  _id: string;
-  title: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  attachments?: BlockAttachment[];
   createdAt: string;
   updatedAt: string;
 }
 
-export interface NoteDraft {
-  type: NoteType;
-  content: string;
-  imageUrl: string;
-  publicId: string;
-  language: string;
-  storageKey?: string;
-  fileName?: string;
-  fileSize?: number;
-  mimeType?: string;
-  attachments?: DraftAttachment[];
+export interface Page {
+  _id: string;
+  title: string;
+  icon: string;
+  parentId: string | null;
+  position: number;
+  favorite: boolean;
+  fullWidth: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface DraftAttachment extends NoteAttachment {
+export interface TrashedPage {
+  _id: string;
+  title: string;
+  icon: string;
+  deletedAt: string;
+}
+
+export interface BlockPatch {
+  content?: string;
+  type?: BlockType;
+  language?: string;
+  checked?: boolean;
+  indent?: number;
+  collapsed?: boolean;
+  color?: BlockColor;
+}
+
+export interface PagePatch {
+  title?: string;
+  icon?: string;
+  favorite?: boolean;
+  fullWidth?: boolean;
+}
+
+export interface AttachmentInput {
+  kind: AttachmentKind;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  imageUrl?: string;
+  publicId?: string;
   storageKey?: string;
+  version?: number;
+  signature?: string;
+}
+
+export interface NewBlockInput {
+  _id: string;
+  type: BlockType;
+  content: string;
+  language: string;
+  position: number;
+  indent: number;
+  checked: boolean;
+  collapsed: boolean;
+  color: BlockColor;
+  attachment?: AttachmentInput;
+}
+
+export interface BlockPlacement {
+  blockId: string;
+  position: number;
+  indent: number;
+}
+
+export interface DuplicatePlacement extends BlockPlacement {
+  newId: string;
+  content: string;
+  language: string;
+  checked: boolean;
+  collapsed: boolean;
+  color: BlockColor;
+}
+
+export interface PagePosition {
+  _id: string;
+  position: number;
+}
+
+export type ActionResult<T extends object = object> = ({ ok: true } & T) | { ok: false; error: string };
+
+export interface SearchResults {
+  query: string;
+  pages: Page[];
+  blocks: Block[];
+  truncated: boolean;
 }

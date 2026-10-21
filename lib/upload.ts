@@ -1,7 +1,7 @@
 import { sendWithProgress, type ProgressCallback } from "@/lib/xhr";
 import {
   attachmentKind,
-  MAX_FILES_PER_NOTE,
+  MAX_FILES_PER_UPLOAD,
   MAX_IMAGE_BYTES,
   type AttachmentKind,
   type AttachmentRef,
@@ -46,10 +46,10 @@ export function splitSelection(files: UploadCandidate[]): {
       rejections.push({ index, error: "Image is too large (max 10MB)" });
       continue;
     }
-    if (kept >= MAX_FILES_PER_NOTE) {
+    if (kept >= MAX_FILES_PER_UPLOAD) {
       rejections.push({
         index,
-        error: `Only the first ${MAX_FILES_PER_NOTE} files can be attached at once`,
+        error: `Only the first ${MAX_FILES_PER_UPLOAD} files can be attached at once`,
       });
       continue;
     }
@@ -99,6 +99,7 @@ type CloudinarySign = {
   signature: string;
   timestamp: number;
   publicId: string;
+  params: Record<string, string>;
 };
 
 type SignResponse = {
@@ -121,7 +122,7 @@ async function uploadImages(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      files: files.map((f) => ({ fileName: f.name, contentType: f.type })),
+      files: files.map((f) => ({ fileName: f.name, contentType: f.type, size: f.size })),
     }),
     signal,
   });
@@ -164,6 +165,7 @@ async function putToCloudinary(
   formData.append("api_key", apiKey);
   formData.append("timestamp", String(sign.timestamp));
   formData.append("public_id", sign.publicId);
+  for (const [name, value] of Object.entries(sign.params)) formData.append(name, value);
   formData.append("signature", sign.signature);
 
   const raw = await sendWithProgress({
@@ -174,29 +176,42 @@ async function putToCloudinary(
     signal,
   });
 
+  const uploaded = parseUploadResponse(raw);
   return {
     kind: "image",
     fileName: file.name,
     fileSize: file.size,
     mimeType: file.type || "application/octet-stream",
-    ...parseUploadResponse(raw),
+    imageUrl: uploaded.secure_url,
+    publicId: uploaded.public_id,
+    version: uploaded.version,
+    signature: uploaded.signature,
   };
 }
 
-function parseUploadResponse(raw: string): {
+type CloudinaryUpload = {
   secure_url: string;
   public_id: string;
-} {
-  let parsed: { secure_url?: string; public_id?: string };
+  version: number;
+  signature: string;
+};
+
+function parseUploadResponse(raw: string): CloudinaryUpload {
+  let parsed: Partial<CloudinaryUpload>;
   try {
-    parsed = JSON.parse(raw) as { secure_url?: string; public_id?: string };
+    parsed = JSON.parse(raw) as Partial<CloudinaryUpload>;
   } catch {
     throw new Error("Could not read the upload response");
   }
-  if (!parsed.secure_url || !parsed.public_id) {
+  if (!parsed.secure_url || !parsed.public_id || typeof parsed.version !== "number" || !parsed.signature) {
     throw new Error("Upload response was incomplete");
   }
-  return { secure_url: parsed.secure_url, public_id: parsed.public_id };
+  return {
+    secure_url: parsed.secure_url,
+    public_id: parsed.public_id,
+    version: parsed.version,
+    signature: parsed.signature,
+  };
 }
 
 type PresignEntry = {

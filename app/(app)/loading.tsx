@@ -1,28 +1,23 @@
 export default function Loading() {
   return (
-    <div className="flex-1 flex overflow-hidden">
-      {}
-      <aside className="hidden lg:block w-72 shrink-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-2 space-y-2">
-        <div className="h-8 bg-slate-100 dark:bg-slate-800 rounded animate-pulse" />
-        {[...Array(5)].map((_, i) => (
+    <div className="flex flex-1 overflow-hidden" aria-busy="true">
+      <aside className="hidden w-64 shrink-0 space-y-2 border-r border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-800 dark:bg-[#1c1c1c] md:block">
+        <div className="mb-4 h-6 w-32 rounded bg-neutral-200 dark:bg-neutral-800 cp-skeleton" />
+        {[0, 1, 2, 3, 4, 5].map((row) => (
           <div
-            key={i}
-            className="h-14 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse"
-            style={{ animationDelay: `${i * 100}ms` }}
+            key={row}
+            className="h-6 rounded bg-neutral-200/70 dark:bg-neutral-800 cp-skeleton"
+            style={{ animationDelay: `${row * 90}ms`, width: `${85 - row * 7}%` }}
           />
         ))}
       </aside>
-
-
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="flex-1 p-4 sm:p-6">
-          <div className="max-w-3xl mx-auto space-y-3">
-            <div className="h-6 w-24 bg-slate-100 dark:bg-slate-800 rounded animate-pulse" />
-            <div className="h-40 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse" />
-          </div>
-        </div>
-        <div className="border-t border-slate-200 dark:border-slate-800 p-4 sm:p-6">
-          <div className="h-24 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse" />
+      <div className="flex-1">
+        <div className="h-12" />
+        <div className="mx-auto max-w-3xl space-y-4 px-6 pt-16 md:px-16">
+          <div className="h-10 w-2/3 rounded bg-neutral-100 dark:bg-neutral-900 cp-skeleton" />
+          <div className="h-4 w-full rounded bg-neutral-100 dark:bg-neutral-900 cp-skeleton" />
+          <div className="h-4 w-5/6 rounded bg-neutral-100 dark:bg-neutral-900 cp-skeleton" />
+          <div className="h-4 w-3/4 rounded bg-neutral-100 dark:bg-neutral-900 cp-skeleton" />
         </div>
       </div>
     </div>

@@ -136,12 +136,13 @@ export async function headObject(
 export async function presignPut(
   config: R2Config,
   key: string,
+  headers: Record<string, string>,
   expiresInSeconds = 900
 ): Promise<string> {
   const client = getClient(config);
   const url = `${objectEndpoint(config, key)}?X-Amz-Expires=${expiresInSeconds}`;
-  const signed = await client.sign(new Request(url, { method: "PUT" }), {
-    aws: { signQuery: true },
+  const signed = await client.sign(new Request(url, { method: "PUT", headers }), {
+    aws: { signQuery: true, allHeaders: true },
   });
   return signed.url.toString();
 }
