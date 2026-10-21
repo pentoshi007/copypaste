@@ -20,9 +20,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CopyPaste — Cross-device clipboard",
+  title: "CopyPaste — Notes & clipboard across devices",
   description:
-    "Sync text, code, links, images, and files across your devices instantly.",
+    "A fast, private, block-based workspace for notes, code, links, images and files — synced across every device.",
   applicationName: "CopyPaste",
   manifest: "/manifest.webmanifest",
   icons: {
@@ -47,7 +47,7 @@ export const viewport: Viewport = {
   interactiveWidget: "resizes-content",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#020617" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
   ],
 };
 
@@ -69,7 +69,7 @@ export default function RootLayout({
         <link rel="preconnect" href="https://res.cloudinary.com" crossOrigin="" />
         <link rel="dns-prefetch" href="https://res.cloudinary.com" />
       </head>
-      <body className="min-h-full flex flex-col bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+      <body className="min-h-full flex flex-col bg-white text-neutral-800 dark:bg-neutral-950 dark:text-neutral-200">
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
         {children}
         <Toaster position="top-center" richColors closeButton duration={2200} />

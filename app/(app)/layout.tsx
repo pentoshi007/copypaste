@@ -1,26 +1,15 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
-import Header from "@/components/Header";
 import ViewportFix from "@/components/ViewportFix";
 
-export default async function AppLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
-  if (!session?.user) {
-    redirect("/login");
-  }
+  if (!session?.user) redirect("/login");
 
   return (
-
-    <div className="app-viewport flex flex-col bg-slate-50 dark:bg-slate-950 overflow-hidden">
+    <div className="app-viewport flex flex-col overflow-hidden bg-white dark:bg-neutral-950">
       <ViewportFix />
-      <Header username={session.user.name ?? "user"} />
-      <main className="flex-1 flex flex-col overflow-hidden min-h-0">
-        {children}
-      </main>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
     </div>
   );
 }

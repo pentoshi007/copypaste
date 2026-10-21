@@ -1,53 +1,51 @@
+import { after } from "next/server";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import dbConnect from "@/lib/db";
-import Note from "@/models/Note";
-import Chat from "@/models/Chat";
-import AppShell from "@/components/AppShell";
-import {
-  CHATS_LIMIT,
-  CHAT_PROJECTION,
-  NOTES_LIMIT,
-  NOTE_PROJECTION,
-  serializeChat,
-  serializeNote,
-} from "@/lib/serialize";
-import type { NoteItem } from "@/lib/types";
+import Workspace from "@/components/workspace/Workspace";
+import { createPageDocument, listActivePages, loadPageBlocks } from "@/lib/server/pages";
+import { purgeExpired } from "@/lib/server/purge";
+import { isObjectId } from "@/lib/guards";
+import type { Block, Page } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-export default async function HomePage() {
+function mostRecent(pages: Page[]): Page | undefined {
+  return pages.reduce<Page | undefined>(
+    (latest, page) => (!latest || page.updatedAt > latest.updatedAt ? page : latest),
+    undefined,
+  );
+}
 
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ p?: string | string[] }>;
+}) {
   const session = await getSession();
-  if (!session?.user?.id) {
-    redirect("/login");
-  }
-  const userId = session.user.id;
+  const userId = session?.user?.id;
+  if (!userId) redirect("/login");
+
+  const { p } = await searchParams;
+  const requested = isObjectId(p) ? p : null;
 
   await dbConnect();
-
-  const chats = await Chat.find({ userId }, CHAT_PROJECTION)
-    .sort({ updatedAt: -1 })
-    .limit(CHATS_LIMIT)
-    .lean();
-
-  const serializedChats = chats.map(serializeChat);
-
-  let serializedNotes: NoteItem[] = [];
-  if (serializedChats.length > 0) {
-    const notes = await Note.find(
-      { userId, chatId: serializedChats[0]._id },
-      NOTE_PROJECTION
-    )
-
-      .sort({ createdAt: -1 })
-      .limit(NOTES_LIMIT)
-      .lean();
-
-    serializedNotes = notes.map(serializeNote).reverse();
+  let pages = await listActivePages(userId);
+  if (pages.length === 0) {
+    pages = [await createPageDocument(userId, { parentId: null, title: "", icon: "" })];
   }
 
+  const active = (requested && pages.find((page) => page._id === requested)) || mostRecent(pages) || null;
+  const blocks: Block[] = active ? await loadPageBlocks(userId, active._id) : [];
+
+  after(() => purgeExpired(userId));
+
   return (
-    <AppShell initialChats={serializedChats} initialNotes={serializedNotes} />
+    <Workspace
+      username={session?.user?.name ?? "user"}
+      initialPages={pages}
+      initialPageId={active?._id ?? null}
+      initialBlocks={blocks}
+    />
   );
 }

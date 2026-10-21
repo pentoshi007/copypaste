@@ -1,7 +1,7 @@
 import { sendWithProgress, type ProgressCallback } from "@/lib/xhr";
 import {
   attachmentKind,
-  MAX_FILES_PER_NOTE,
+  MAX_FILES_PER_UPLOAD,
   MAX_IMAGE_BYTES,
   type AttachmentKind,
   type AttachmentRef,
@@ -46,10 +46,10 @@ export function splitSelection(files: UploadCandidate[]): {
       rejections.push({ index, error: "Image is too large (max 10MB)" });
       continue;
     }
-    if (kept >= MAX_FILES_PER_NOTE) {
+    if (kept >= MAX_FILES_PER_UPLOAD) {
       rejections.push({
         index,
-        error: `Only the first ${MAX_FILES_PER_NOTE} files can be attached at once`,
+        error: `Only the first ${MAX_FILES_PER_UPLOAD} files can be attached at once`,
       });
       continue;
     }
@@ -121,7 +121,7 @@ async function uploadImages(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      files: files.map((f) => ({ fileName: f.name, contentType: f.type })),
+      files: files.map((f) => ({ fileName: f.name, contentType: f.type, size: f.size })),
     }),
     signal,
   });
@@ -174,12 +174,14 @@ async function putToCloudinary(
     signal,
   });
 
+  const uploaded = parseUploadResponse(raw);
   return {
     kind: "image",
     fileName: file.name,
     fileSize: file.size,
     mimeType: file.type || "application/octet-stream",
-    ...parseUploadResponse(raw),
+    imageUrl: uploaded.secure_url,
+    publicId: uploaded.public_id,
   };
 }
 
