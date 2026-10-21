@@ -127,6 +127,7 @@ function toInput(block: LocalBlock): NewBlockInput {
     position: block.position,
     indent: block.indent,
     checked: block.checked,
+    collapsed: block.collapsed,
     color: block.color,
     attachment: result
       ? {
@@ -170,10 +171,11 @@ function assignPositions(order: LocalBlock[], changed: ReadonlySet<string>) {
 export class BlockStore {
   private blocks: LocalBlock[];
   private readonly confirmed = new Set<string>();
+  private readonly attempted = new Set<string>();
   private readonly patches = new Map<string, BlockPatch>();
   private readonly timers = new Map<string, number>();
   private readonly uploads = new Map<string, AbortController>();
-  private readonly unsaved = new Set<string>();
+  private readonly unsaved = new Map<string, string | null>();
   private readonly listeners = new Set<() => void>();
   private retryTimer = 0;
   private lastMutation = 0;
@@ -215,8 +217,8 @@ export class BlockStore {
     return this.blocks.filter((block) => this.confirmed.has(block.key) && !block.upload).map(toBlock);
   }
 
-  replaceFromServer(blocks: Block[], keepKey: string | null, requestedAt: number): boolean {
-    if (this.hasPendingWork() || this.lastMutation >= requestedAt) return false;
+  replaceFromServer(blocks: Block[], keepKey: string | null, requestedAt: number, force = false): boolean {
+    if (this.hasPendingWork() || (!force && this.lastMutation >= requestedAt)) return false;
     const local = keepKey ? this.find(keepKey) : undefined;
     const localOnly = this.blocks.filter((block) => block.pending);
 
@@ -320,12 +322,13 @@ export class BlockStore {
     for (const block of removed) {
       if (this.confirmed.has(block.key)) this.flush(block.key);
       this.forget(block.key);
+      this.markSaved(block.key);
     }
     this.commit(this.blocks.filter((block) => !keySet.has(block.key)));
     for (const block of removed) this.discardUpload(block);
 
     void syncQueue.enqueue(async () => {
-      const blockIds = removed.map((block) => block.key).filter((key) => this.confirmed.has(key));
+      const blockIds = removed.map((block) => block.key).filter((key) => this.isKnown(key));
       if (blockIds.length === 0) return true;
       return this.settle(await deleteBlocks({ blockIds }));
     });
@@ -350,6 +353,7 @@ export class BlockStore {
 
     this.flush(targetKey);
     this.forget(sourceKey);
+    this.markSaved(sourceKey);
     this.commit(
       this.blocks
         .filter((block) => block.key !== sourceKey)
@@ -358,7 +362,7 @@ export class BlockStore {
 
     void syncQueue.enqueue(async () => {
       const targetSaved = this.confirmed.has(targetKey);
-      const sourceSaved = this.confirmed.has(sourceKey);
+      const sourceSaved = this.isKnown(sourceKey);
       const latest = this.find(targetKey)?.content ?? content;
       if (targetSaved && sourceSaved) {
         return this.settle(await mergeBlocks({ targetId: targetKey, sourceId: sourceKey, content: latest }));
@@ -589,7 +593,10 @@ export class BlockStore {
               Boolean(block?.pending) && (!block?.upload || Boolean(block.upload.result)),
           );
         if (targets.length === 0) return true;
-        for (const target of targets) this.patches.delete(target.key);
+        for (const target of targets) {
+          this.patches.delete(target.key);
+          this.attempted.add(target.key);
+        }
 
         const result = await createBlocks({ pageId: this.pageId, blocks: targets.map(toInput) });
         if (!result.ok) {
@@ -600,7 +607,7 @@ export class BlockStore {
         this.adopt(result.blocks);
         return true;
       },
-      { onGiveUp: () => this.retryLater(keys) },
+      { onGiveUp: () => this.retryLater(keys.map((key) => ({ key, source: null }))) },
     );
   }
 
@@ -629,7 +636,10 @@ export class BlockStore {
           this.dropLocal(copyKeys.filter((key) => this.find(key)?.pending));
           return true;
         }
-        for (const placement of placements) this.patches.delete(placement.newId);
+        for (const placement of placements) {
+          this.patches.delete(placement.newId);
+          this.attempted.add(placement.newId);
+        }
 
         const result = await duplicateBlocks({ pageId: this.pageId, placements });
         if (!result.ok) {
@@ -640,22 +650,28 @@ export class BlockStore {
         this.adopt(result.blocks);
         return true;
       },
-      { onGiveUp: () => this.retryDuplicatesLater(pairs) },
+      {
+        onGiveUp: () =>
+          this.retryLater(pairs.map(({ sourceKey, copyKey }) => ({ key: copyKey, source: sourceKey }))),
+      },
     );
   }
 
-  private retryLater(keys: string[]) {
-    for (const key of keys) {
-      if (this.find(key)?.pending && !this.unsaved.has(key)) {
-        this.unsaved.add(key);
-        syncQueue.setUnsaved(1);
-      }
+  private retryLater(entries: { key: string; source: string | null }[]) {
+    for (const { key, source } of entries) {
+      if (!this.find(key)?.pending || this.unsaved.has(key)) continue;
+      this.unsaved.set(key, source);
+      syncQueue.setUnsaved(1);
     }
     this.scheduleRetry();
   }
 
-  private retryDuplicatesLater(pairs: { sourceKey: string; copyKey: string }[]) {
-    window.setTimeout(() => this.persistDuplicates(pairs), CREATE_RETRY_MS);
+  private markSaved(key: string) {
+    if (this.unsaved.delete(key)) syncQueue.setUnsaved(-1);
+  }
+
+  private isKnown(key: string): boolean {
+    return this.confirmed.has(key) || this.attempted.has(key);
   }
 
   private scheduleRetry() {
@@ -664,10 +680,15 @@ export class BlockStore {
       window.removeEventListener("online", retry);
       window.clearTimeout(this.retryTimer);
       this.retryTimer = 0;
-      const keys = [...this.unsaved];
-      this.unsaved.clear();
-      syncQueue.setUnsaved(-keys.length);
-      this.persistCreation(keys);
+      const entries = [...this.unsaved.entries()];
+      for (const [key] of entries) this.markSaved(key);
+
+      const creates = entries.filter(([, source]) => source === null).map(([key]) => key);
+      const duplicates = entries.flatMap(([key, source]) =>
+        source ? [{ sourceKey: source, copyKey: key }] : [],
+      );
+      if (creates.length > 0) this.persistCreation(creates);
+      if (duplicates.length > 0) this.persistDuplicates(duplicates);
     };
     window.addEventListener("online", retry);
     this.retryTimer = window.setTimeout(retry, CREATE_RETRY_MS);
@@ -691,7 +712,8 @@ export class BlockStore {
     const byKey = new Map(saved.map((block) => [block._id, block]));
     for (const block of saved) {
       this.confirmed.add(block._id);
-      if (this.unsaved.delete(block._id)) syncQueue.setUnsaved(-1);
+      this.attempted.delete(block._id);
+      this.markSaved(block._id);
     }
 
     const created: LocalBlock[] = [];
@@ -733,7 +755,7 @@ export class BlockStore {
       if (!keySet.has(block.key)) continue;
       this.discardUpload(block);
       this.forget(block.key);
-      if (this.unsaved.delete(block.key)) syncQueue.setUnsaved(-1);
+      this.markSaved(block.key);
     }
     this.commit(this.blocks.filter((block) => !keySet.has(block.key)));
   }

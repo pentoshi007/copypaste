@@ -48,12 +48,14 @@ import type { Block, BlockPatch, Page, PagePatch } from "@/lib/types";
 
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 const HIGHLIGHT_MS = 2200;
+const RESYNC_DELAY_MS = 1500;
+const MAX_RESYNC_ATTEMPTS = 4;
 
 interface PageEditorProps {
   page: Page;
   pages: Page[];
   initialBlocks: Block[];
-  remote: { version: number; blocks: Block[]; requestedAt: number } | null;
+  remote: { version: number; blocks: Block[]; requestedAt: number; force: boolean } | null;
   autoFocusTitle: boolean;
   revealBlockId: string | null;
   onRevealed(): void;
@@ -824,9 +826,26 @@ export default function PageEditor(props: PageEditorProps) {
     }
   }, [api, store]);
 
+  const resyncAttempts = useRef(0);
   useEffect(() => {
     if (!remote) return;
-    store.replaceFromServer(remote.blocks, editingRef.current, remote.requestedAt);
+    const applied = store.replaceFromServer(
+      remote.blocks,
+      editingRef.current,
+      remote.requestedAt,
+      remote.force,
+    );
+    if (applied || !remote.force) {
+      resyncAttempts.current = 0;
+      return;
+    }
+    if (resyncAttempts.current >= MAX_RESYNC_ATTEMPTS) return;
+    resyncAttempts.current += 1;
+    const timer = window.setTimeout(
+      () => latest.current.onConflict(latest.current.page._id),
+      RESYNC_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
   }, [remote, store]);
 
   useEffect(() => {

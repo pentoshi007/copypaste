@@ -178,6 +178,8 @@ export async function duplicatePage(input: {
       if (pageCapacity) return fail(pageCapacity);
 
       await ensureBlockPositions(userId, pageId);
+      const sourceCount = await Block.countDocuments({ userId, chatId: pageId, deletedAt: null });
+      if (sourceCount > MAX_BLOCKS_PER_PAGE) return fail("This page is too large to duplicate");
       const blocks = await Block.find({ userId, chatId: pageId, deletedAt: null })
         .sort({ position: 1 })
         .limit(MAX_BLOCKS_PER_PAGE)

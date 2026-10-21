@@ -1,3 +1,5 @@
+import { isImageMime } from "@/lib/attachments";
+
 export type PreviewKind = "pdf" | "image" | "video" | "audio" | "text" | "none";
 
 const TEXT_EXTENSIONS =
@@ -10,7 +12,7 @@ export function previewKind(mimeType: string, fileName: string): PreviewKind {
 
   if (mt === "application/pdf" || PDF_EXTENSION.test(fileName)) return "pdf";
 
-  if (mt.startsWith("image/") && mt !== "image/svg+xml") return "image";
+  if (isImageMime(mt)) return "image";
   if (mt.startsWith("video/")) return "video";
   if (mt.startsWith("audio/")) return "audio";
 
@@ -22,17 +24,14 @@ export function previewKind(mimeType: string, fileName: string): PreviewKind {
 
 export function isInlineViewable(mimeType: string, fileName: string): boolean {
   const kind = previewKind(mimeType, fileName);
-  return (
-    kind === "pdf" || kind === "image" || kind === "video" || kind === "audio"
-  );
+  return kind === "pdf" || kind === "image" || kind === "video" || kind === "audio";
 }
 
 export const TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
 
 export function isOfficeDocument(mimeType: string, fileName: string): boolean {
   return (
-    /officedocument|ms-excel|ms-powerpoint|msword|opendocument/i.test(
-      mimeType
-    ) || /\.(docx?|xlsx?|pptx?|odt|ods|odp|rtf|pages|numbers|key)$/i.test(fileName)
+    /officedocument|ms-excel|ms-powerpoint|msword|opendocument/i.test(mimeType) ||
+    /\.(docx?|xlsx?|pptx?|odt|ods|odp|rtf|pages|numbers|key)$/i.test(fileName)
   );
 }

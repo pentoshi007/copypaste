@@ -62,8 +62,7 @@ async function verifyImage(input: AttachmentInput, userId: string): Promise<Veri
   const lookup = await lookupImage(publicId);
   if (lookup.status === "missing") return { ok: false, error: "Upload didn't complete — please try again" };
 
-  const declared = Math.min(Math.max(1, Math.floor(input.fileSize)), MAX_IMAGE_BYTES);
-  const bytes = lookup.status === "found" ? lookup.bytes : declared;
+  const bytes = lookup.status === "found" ? lookup.bytes : MAX_IMAGE_BYTES;
   if (!Number.isFinite(bytes) || bytes <= 0 || bytes > MAX_IMAGE_BYTES) {
     return { ok: false, error: "Image is too large (max 10MB)", orphan };
   }

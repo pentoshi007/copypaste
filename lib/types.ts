@@ -91,6 +91,7 @@ export interface NewBlockInput {
   position: number;
   indent: number;
   checked: boolean;
+  collapsed: boolean;
   color: BlockColor;
   attachment?: AttachmentInput;
 }

@@ -3,6 +3,7 @@ import { v2 as cloudinary } from "cloudinary";
 export const IMAGE_FORMATS = "jpg,jpeg,png,gif,webp,avif,bmp,ico,heic,heif,tif,tiff,jfif";
 
 const DELETE_BATCH = 100;
+const RESOURCE_TYPES = ["image", "raw", "video"] as const;
 
 export interface CloudinaryCredentials {
   cloudName: string;
@@ -76,8 +77,9 @@ export async function destroyImages(publicIds: readonly string[]): Promise<void>
   const api = client();
   if (!api || publicIds.length === 0) return;
   for (let i = 0; i < publicIds.length; i += DELETE_BATCH) {
-    await api.api
-      .delete_resources(publicIds.slice(i, i + DELETE_BATCH), { resource_type: "image" })
-      .catch(() => undefined);
+    const batch = publicIds.slice(i, i + DELETE_BATCH);
+    await Promise.allSettled(
+      RESOURCE_TYPES.map((resourceType) => api.api.delete_resources(batch, { resource_type: resourceType })),
+    );
   }
 }

@@ -64,7 +64,7 @@ interface WorkspaceProps {
 interface PageData {
   pageId: string | null;
   blocks: Block[] | null;
-  remote: { version: number; blocks: Block[]; requestedAt: number } | null;
+  remote: { version: number; blocks: Block[]; requestedAt: number; force: boolean } | null;
   failed: boolean;
 }
 
@@ -147,7 +147,7 @@ export default function Workspace({ username, initialPages, initialPageId, initi
   );
 
   const loadBlocks = useCallback(
-    async (pageId: string) => {
+    async (pageId: string, force = false) => {
       try {
         const { data: blocks, requestedAt } = await fetchPageBlocks(pageId);
         remoteVersion.current += 1;
@@ -156,7 +156,7 @@ export default function Workspace({ username, initialPages, initialPageId, initi
           if (current.pageId !== pageId) return current;
           return current.blocks === null
             ? { ...current, blocks, failed: false }
-            : { ...current, remote: { version, blocks, requestedAt } };
+            : { ...current, remote: { version, blocks, requestedAt, force } };
         });
       } catch (error) {
         if (error instanceof RequestError && error.status === 404) {
@@ -699,7 +699,7 @@ export default function Workspace({ username, initialPages, initialPageId, initi
             onOpenPage={(pageId) => openPage(pageId)}
             onBlocksMoved={(pageId) => cacheRef.current.delete(pageId)}
             onSnapshot={(pageId, blocks) => cacheRef.current.set(pageId, blocks)}
-            onConflict={(pageId) => void loadBlocks(pageId)}
+            onConflict={(pageId) => void loadBlocks(pageId, true)}
           />
         ) : activePage ? (
           pageData.failed ? (

@@ -23,8 +23,8 @@ async function snapshot<T>(
   pick: (body: never) => T,
   signal?: AbortSignal,
 ): Promise<Snapshot<T>> {
-  await syncQueue.idle();
   const requestedAt = Date.now();
+  await syncQueue.idle();
   const body = await getJson<never>(url, signal);
   return { data: pick(body), requestedAt };
 }

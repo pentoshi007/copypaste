@@ -66,6 +66,7 @@ const newBlockSchema = z.object({
   position,
   indent,
   checked: z.boolean(),
+  collapsed: z.boolean(),
   color: z.enum(BLOCK_COLORS),
   attachment: attachmentSchema.optional(),
 });
@@ -159,6 +160,62 @@ async function insertMissing(docs: Raw[]): Promise<void> {
   }
 }
 
+interface MutableFields {
+  _id: string;
+  type: BlockType;
+  content: string;
+  language: string;
+  position: number;
+  indent: number;
+  checked: boolean;
+  collapsed: boolean;
+  color: string;
+}
+
+async function refreshExisting(
+  userId: string,
+  pageId: string,
+  items: MutableFields[],
+): Promise<string | null> {
+  if (items.length === 0) return null;
+  const stored = await Block.find(
+    { _id: { $in: items.map((item) => item._id) }, userId, chatId: pageId },
+    { type: 1 },
+  ).lean<Raw[]>();
+  const types = new Map(stored.map((doc) => [String(doc._id), doc.type as BlockType]));
+  const now = new Date();
+  const operations: { updateOne: { filter: Raw; update: Raw } }[] = [];
+
+  for (const item of items) {
+    const storedType = types.get(item._id);
+    if (!storedType) continue;
+    const type = storedType === item.type || canConvert(storedType, item.type) ? item.type : storedType;
+    const content = contentFor(type, item.content);
+    if (typeof content !== "string") return content.error;
+    operations.push({
+      updateOne: {
+        filter: { _id: item._id, userId, chatId: pageId },
+        update: {
+          $set: {
+            type,
+            content,
+            language: type === "code" ? item.language : "",
+            position: item.position,
+            indent: item.indent,
+            checked: type === "todo" ? item.checked : false,
+            collapsed: item.collapsed,
+            color: item.color,
+            updatedAt: now,
+          },
+        },
+      },
+    });
+  }
+
+  if (operations.length > 0) await Block.bulkWrite(operations, { ordered: false });
+  return null;
+}
+
 async function loadInOrder(userId: string, pageId: string, ids: string[]): Promise<BlockItem[] | null> {
   const saved = await Block.find({ _id: { $in: ids }, userId, chatId: pageId }, BLOCK_PROJECTION).lean<
     Raw[]
@@ -226,6 +283,7 @@ async function prepareBlock(
     position: input.position,
     indent: input.indent,
     checked: input.type === "todo" ? input.checked : false,
+    collapsed: input.collapsed,
     color: input.color,
     storage: "none",
   };
@@ -262,6 +320,12 @@ export async function createBlocks(input: {
       const known = await existingIds(userId, pageId, ids);
       if (!known) return fail("Those blocks couldn't be saved");
       const missing = blocks.filter((block) => !known.has(block._id));
+      const refreshError = await refreshExisting(
+        userId,
+        pageId,
+        blocks.filter((block) => known.has(block._id)),
+      );
+      if (refreshError) return fail(refreshError);
 
       if (missing.length > 0) {
         const capacity = await blockCapacityError(userId, { pageId, account: true }, missing.length);
@@ -483,6 +547,22 @@ export async function duplicateBlocks(input: {
       const known = await existingIds(userId, pageId, ids);
       if (!known) return fail("Those blocks couldn't be saved");
       const missing = placements.filter((placement) => !known.has(placement.newId));
+      const stored = await Block.find({ _id: { $in: [...known] }, userId, chatId: pageId }, { type: 1 }).lean<
+        Raw[]
+      >();
+      const storedTypes = new Map(stored.map((doc) => [String(doc._id), doc.type as BlockType]));
+      const refreshError = await refreshExisting(
+        userId,
+        pageId,
+        placements
+          .filter((placement) => storedTypes.has(placement.newId))
+          .map((placement) => ({
+            ...placement,
+            _id: placement.newId,
+            type: storedTypes.get(placement.newId) as BlockType,
+          })),
+      );
+      if (refreshError) return fail(refreshError);
 
       const capacity = await blockCapacityError(userId, { pageId, account: true }, missing.length);
       if (capacity) return fail(capacity);
@@ -541,17 +621,18 @@ export async function mergeBlocks(input: {
       if (targetId === sourceId) return fail("Invalid merge");
       const [target, source] = await Promise.all([
         Block.findOne({ _id: targetId, userId, deletedAt: null }, { type: 1, chatId: 1 }).lean<Raw>(),
-        Block.findOne({ _id: sourceId, userId, deletedAt: null }, { chatId: 1 }).lean<Raw>(),
+        Block.findOne({ _id: sourceId, userId }, { chatId: 1 }).lean<Raw>(),
       ]);
-      if (!target || !source || String(target.chatId) !== String(source.chatId))
-        return fail("Block not found");
+      if (!target) return fail("Block not found");
+      if (source && String(target.chatId) !== String(source.chatId)) return fail("Block not found");
 
       const merged = contentFor(target.type as BlockType, content);
       if (typeof merged !== "string") return fail(merged.error);
 
       const now = new Date();
       await Block.updateOne({ _id: targetId, userId }, { $set: { content: merged, updatedAt: now } });
-      await Block.updateOne({ _id: sourceId, userId, deletedAt: null }, { $set: { deletedAt: now } });
+      if (source)
+        await Block.updateOne({ _id: sourceId, userId, deletedAt: null }, { $set: { deletedAt: now } });
       await touchActivePage(userId, String(target.chatId));
       return { ok: true };
     },
