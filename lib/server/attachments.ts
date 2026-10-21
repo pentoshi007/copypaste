@@ -1,5 +1,6 @@
 import { MAX_IMAGE_BYTES, attachmentKind } from "@/lib/attachments";
 import { MAX_FILE_BYTES, getR2Config, headObject, isOwnedFileKey, sanitizeFileName } from "@/lib/r2";
+import { isGenuineUploadResponse, lookupImage } from "@/lib/server/cloudinary";
 import { hasPendingUpload } from "@/lib/server/uploads";
 import type { AttachmentInput } from "@/lib/types";
 
@@ -28,12 +29,6 @@ export type VerifyResult =
 
 const MAX_MB = Math.floor(MAX_FILE_BYTES / (1024 * 1024));
 
-interface CloudinaryResource {
-  bytes?: number;
-  secure_url?: string;
-  format?: string;
-}
-
 export function isOwnedCloudinaryId(publicId: string, userId: string): boolean {
   if (!publicId || publicId.includes("..") || publicId.includes("//")) return false;
   return /^u\/[a-f0-9]{24}\/[a-f0-9]{32}$/i.test(publicId) && publicId.startsWith(`u/${userId}/`);
@@ -51,46 +46,40 @@ export function isCloudinaryDeliveryUrl(url: string, publicId: string): boolean 
   }
 }
 
-async function fetchCloudinaryResource(publicId: string): Promise<CloudinaryResource | null> {
-  try {
-    const cloudinary = (await import("cloudinary")).default;
-    return (await cloudinary.v2.api.resource(publicId, { resource_type: "image" })) as CloudinaryResource;
-  } catch {
-    return null;
-  }
-}
-
 async function verifyImage(input: AttachmentInput, userId: string): Promise<VerifyResult> {
   const publicId = input.publicId ?? "";
   if (!isOwnedCloudinaryId(publicId, userId)) return { ok: false, error: "Invalid image reference" };
+  if (typeof input.version !== "number" || !input.signature)
+    return { ok: false, error: "Image upload incomplete" };
+  if (!isGenuineUploadResponse(publicId, input.version, input.signature)) {
+    return { ok: false, error: "Invalid image upload" };
+  }
   if (!(await hasPendingUpload(userId, publicId))) {
     return { ok: false, error: "That upload has expired — please try again" };
   }
 
-  const resource = await fetchCloudinaryResource(publicId);
-  if (!resource?.secure_url) return { ok: false, error: "Upload didn't complete — please try again" };
+  const orphan = { kind: "image" as const, key: publicId };
+  const lookup = await lookupImage(publicId);
+  if (lookup.status === "missing") return { ok: false, error: "Upload didn't complete — please try again" };
 
-  const bytes = Number(resource.bytes ?? 0);
+  const declared = Math.min(Math.max(1, Math.floor(input.fileSize)), MAX_IMAGE_BYTES);
+  const bytes = lookup.status === "found" ? lookup.bytes : declared;
   if (!Number.isFinite(bytes) || bytes <= 0 || bytes > MAX_IMAGE_BYTES) {
-    return {
-      ok: false,
-      error: "Image is too large (max 10MB)",
-      orphan: { kind: "image", key: publicId },
-    };
+    return { ok: false, error: "Image is too large (max 10MB)", orphan };
   }
-  if (!isCloudinaryDeliveryUrl(resource.secure_url, publicId)) {
-    return { ok: false, error: "Invalid image URL" };
-  }
+
+  const imageUrl = lookup.status === "found" ? lookup.secureUrl : (input.imageUrl ?? "");
+  if (!isCloudinaryDeliveryUrl(imageUrl, publicId)) return { ok: false, error: "Invalid image URL" };
 
   return {
     ok: true,
     value: {
       storage: "cloudinary",
-      imageUrl: resource.secure_url,
+      imageUrl,
       publicId,
       fileName: sanitizeFileName(input.fileName || "image"),
       fileSize: bytes,
-      mimeType: resource.format ? `image/${resource.format}` : input.mimeType,
+      mimeType: lookup.status === "found" && lookup.format ? `image/${lookup.format}` : input.mimeType,
     },
   };
 }

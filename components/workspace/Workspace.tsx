@@ -64,7 +64,7 @@ interface WorkspaceProps {
 interface PageData {
   pageId: string | null;
   blocks: Block[] | null;
-  remote: { version: number; blocks: Block[] } | null;
+  remote: { version: number; blocks: Block[]; requestedAt: number } | null;
   failed: boolean;
 }
 
@@ -102,6 +102,7 @@ export default function Workspace({ username, initialPages, initialPageId, initi
 
   const isMobile = useIsMobile();
   const pagesRef = useRef(pages);
+  const pagesMutatedAt = useRef(0);
   const activeIdRef = useRef(activeId);
   const expandedRef = useRef(expandedList);
   const cacheRef = useRef(new Map<string, Block[]>(initialPageId ? [[initialPageId, initialBlocks]] : []));
@@ -114,11 +115,15 @@ export default function Workspace({ username, initialPages, initialPageId, initi
     expandedRef.current = expandedList;
   }, [expandedList]);
 
-  const setPages = useCallback((update: (current: Page[]) => Page[]) => {
-    const next = update(pagesRef.current);
-    pagesRef.current = next;
-    setPagesState(next);
-  }, []);
+  const setPages = useCallback(
+    (update: (current: Page[]) => Page[], origin: "local" | "server" = "local") => {
+      const next = update(pagesRef.current);
+      pagesRef.current = next;
+      if (origin === "local") pagesMutatedAt.current = Date.now();
+      setPagesState(next);
+    },
+    [],
+  );
 
   const setActiveId = useCallback((pageId: string | null) => {
     activeIdRef.current = pageId;
@@ -144,15 +149,14 @@ export default function Workspace({ username, initialPages, initialPageId, initi
   const loadBlocks = useCallback(
     async (pageId: string) => {
       try {
-        const blocks = await fetchPageBlocks(pageId);
-        cacheRef.current.set(pageId, blocks);
+        const { data: blocks, requestedAt } = await fetchPageBlocks(pageId);
         remoteVersion.current += 1;
         const version = remoteVersion.current;
         setPageData((current) => {
           if (current.pageId !== pageId) return current;
           return current.blocks === null
             ? { ...current, blocks, failed: false }
-            : { ...current, remote: { version, blocks } };
+            : { ...current, remote: { version, blocks, requestedAt } };
         });
       } catch (error) {
         if (error instanceof RequestError && error.status === 404) {
@@ -324,7 +328,7 @@ export default function Workspace({ username, initialPages, initialPageId, initi
         if (!result.ok) {
           toast.error(result.error);
           fetchPages()
-            .then((fresh) => setPages(() => fresh))
+            .then((fresh) => setPages(() => fresh.data, "server"))
             .catch(() => undefined);
           return false;
         }
@@ -359,7 +363,8 @@ export default function Workspace({ username, initialPages, initialPageId, initi
     const page = pagesRef.current.find((item) => item._id === pageId);
     if (!page) return;
     try {
-      const markdown = pageToMarkdown(page.title, await fetchPageBlocks(pageId));
+      const { data: blocks } = await fetchPageBlocks(pageId);
+      const markdown = pageToMarkdown(page.title, blocks);
       if (mode === "download") downloadText(markdownFileName(page.title), markdown);
       else if (await copyToClipboard(markdown)) toast.success("Copied as Markdown");
       else toast.error("Couldn't copy");
@@ -561,7 +566,7 @@ export default function Workspace({ username, initialPages, initialPageId, initi
     };
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       flushAll();
-      if (syncQueue.isBusy()) event.preventDefault();
+      if (syncQueue.hasUnsaved()) event.preventDefault();
     };
     const refresh = () => {
       if (document.visibilityState !== "visible") {
@@ -573,7 +578,9 @@ export default function Workspace({ username, initialPages, initialPageId, initi
       lastRefresh.current = now;
       fetchPages()
         .then((fresh) => {
-          if (pendingPatches.current.size === 0 && !syncQueue.isBusy()) setPages(() => fresh);
+          const stale = pagesMutatedAt.current >= fresh.requestedAt;
+          if (!stale && pendingPatches.current.size === 0 && !syncQueue.isBusy())
+            setPages(() => fresh.data, "server");
         })
         .catch(() => undefined);
       if (activeIdRef.current) void loadBlocks(activeIdRef.current);
@@ -692,6 +699,7 @@ export default function Workspace({ username, initialPages, initialPageId, initi
             onOpenPage={(pageId) => openPage(pageId)}
             onBlocksMoved={(pageId) => cacheRef.current.delete(pageId)}
             onSnapshot={(pageId, blocks) => cacheRef.current.set(pageId, blocks)}
+            onConflict={(pageId) => void loadBlocks(pageId)}
           />
         ) : activePage ? (
           pageData.failed ? (

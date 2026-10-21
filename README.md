@@ -26,7 +26,7 @@ A fast, private, Notion-style workspace for everything you move between devices 
 - One-tap **copy** on every text block, code block and link.
 
 ### Everywhere
-- **Optimistic, debounced autosave** through a single ordered queue with retry, a Saving / Saved indicator, and a guard against closing the tab mid-save.
+- **Optimistic, debounced autosave** through a single ordered queue with retry, a Saving / Saved indicator, and a guard against closing the tab mid-save. Blocks get their ids on the client, so a create that loses its response can be retried without duplicating anything; merges are a single server operation; background refreshes never overwrite newer local edits.
 - **Cross-device refresh**: returning to the tab re-syncs pages and the open page.
 - **Search** (`⌘K` / `⌘P`) across page titles, block text, captions and file names, with highlighted snippets and jump-to-block.
 - **Responsive**: sidebar drawer and a keyboard-aware block toolbar on phones, safe-area aware, installable PWA, dark mode.
@@ -57,19 +57,19 @@ Existing data needs no migration: chats become top-level pages and notes become 
 
 The invariant is unchanged: **a user can only ever read or modify their own data.**
 
-- **Every server action** goes through one guard (`lib/server/actions.ts`): session check, per-user write rate limit, Zod validation, and generic error messages. Every query is scoped by the session's `userId`; client-supplied ids are only ever used together with it.
+- **Every server action** goes through one guard (`lib/server/actions.ts`): session check, per-user write rate limit, Zod validation, per-user write serialization on each instance (so capacity checks can't be raced), and generic error messages. Every query is scoped by the session's `userId`; client-supplied ids are only ever used together with it.
 - **Every API route** requires a session, rejects cross-site requests via `Sec-Fetch-Site`, and responds `private, no-store`. Pages that aren't yours return the same 404 as pages that don't exist.
 - **Pages**: moves are checked for cycles and a maximum depth; icons come from a fixed allowlist; per-account page and block caps prevent storage abuse.
-- **Uploads are reserved server-side**. `/api/upload-url` and `/api/upload-sign` record every key they authorize, enforce a per-user storage quota (`USER_STORAGE_QUOTA_BYTES`, default 2 GB) and a cap on unfinished uploads. A block can only be created from a reservation that belongs to you and hasn't been used. Abandoned reservations are swept and their objects deleted after an hour.
+- **Uploads are reserved server-side**. `/api/upload-url` and `/api/upload-sign` record every key they authorize, enforce a per-user storage quota (`USER_STORAGE_QUOTA_BYTES`, default 2 GB) and a cap on unfinished uploads. A block can only be created from a reservation that belongs to you and hasn't been used. Abandoned reservations are swept and their objects deleted after three hours.
 - **R2 presigned PUTs sign `Content-Length`, `Content-Type` and `Content-Disposition`**, so the bytes uploaded must match what was authorized. This closes oversize uploads and the stored-XSS route of uploading HTML with an `inline` disposition.
-- **Images are verified with Cloudinary's API** before a block is saved: the server reads the real size and delivery URL instead of trusting the browser.
+- **Image uploads are signed with `overwrite=false` and an image-format allowlist**, so a signed id can't be reused to replace or smuggle content. Before a block is saved the server checks Cloudinary's signed upload response, and reads the real size and URL from Cloudinary when its Admin API is available.
 - **File ownership** is verified on every attachment (`f/<userId>/…` prefix plus `HEAD`). This also fixes a gap where grouped attachments skipped the prefix check.
 - **Shared blobs are reference-checked** before deletion, so duplicating a block and deleting one copy never breaks the other.
 - **Rendering**: block text is parsed into React elements, never HTML. Links are limited to `http`, `https` and `mailto` and open with `noopener noreferrer`. SVG is treated as a file and never previewed inline.
 - **Downloads** still go through `/api/files/[blockId]`, which checks ownership and redirects to a 2-minute signed URL; `storageKey` is never sent to the client.
 - Passwords are hashed with bcrypt (12 rounds); login and signup are rate limited per IP and per username.
 
-Known limitation: rate limits are in-memory and per instance. Use Redis/KV for multi-instance deployments.
+Known limitation: rate limits and write serialization are in-memory and per instance. Use Redis/KV (or Mongo transactions) for multi-instance deployments.
 
 ## Local development
 

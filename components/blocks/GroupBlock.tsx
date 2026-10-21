@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { ChevronDown, Download, Eye, Images, Loader2, Pencil } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown, Download, Eye, Images, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import AttachmentPreview, { fileHref, usePdfEmbeddable } from "./AttachmentPreview";
 import Caption from "./Caption";
 import { FileTypeIcon } from "@/components/FileTypeIcon";
 import { useEditor } from "@/components/editor/EditorContext";
 import { updateAttachmentCaption } from "@/actions/blocks";
+import { syncQueue } from "@/lib/client/syncQueue";
 import { fileExtension, formatBytes } from "@/lib/format";
 import { previewKind } from "@/lib/preview";
 import { MAX_CAPTION_LENGTH } from "@/lib/editor/blockTypes";
@@ -18,7 +19,6 @@ function AttachmentCaption({ block, attachment }: { block: LocalBlock; attachmen
   const api = useEditor();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(attachment.caption);
-  const [pending, startTransition] = useTransition();
 
   if (!editing) {
     return attachment.caption ? (
@@ -53,7 +53,7 @@ function AttachmentCaption({ block, attachment }: { block: LocalBlock; attachmen
     if (next === attachment.caption) return;
     const previous = attachment.caption;
     api.store.setAttachmentCaption(block.key, attachment.index, next);
-    startTransition(async () => {
+    void syncQueue.enqueue(async () => {
       const result = await updateAttachmentCaption({
         blockId: block._id,
         index: attachment.index,
@@ -63,6 +63,7 @@ function AttachmentCaption({ block, attachment }: { block: LocalBlock; attachmen
         toast.error(result.error);
         api.store.setAttachmentCaption(block.key, attachment.index, previous);
       }
+      return result.ok;
     });
   };
 
@@ -82,7 +83,6 @@ function AttachmentCaption({ block, attachment }: { block: LocalBlock; attachmen
         aria-label="Attachment caption"
         className="min-w-0 flex-1 rounded border border-neutral-300 bg-white px-1.5 py-1 text-base text-neutral-900 outline-none focus:ring-1 focus:ring-blue-500 dark:border-neutral-600 dark:bg-neutral-900 dark:text-white sm:text-xs"
       />
-      {pending && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
     </div>
   );
 }

@@ -79,9 +79,12 @@ export interface AttachmentInput {
   imageUrl?: string;
   publicId?: string;
   storageKey?: string;
+  version?: number;
+  signature?: string;
 }
 
 export interface NewBlockInput {
+  _id: string;
   type: BlockType;
   content: string;
   language: string;
@@ -99,6 +102,7 @@ export interface BlockPlacement {
 }
 
 export interface DuplicatePlacement extends BlockPlacement {
+  newId: string;
   content: string;
   language: string;
   checked: boolean;

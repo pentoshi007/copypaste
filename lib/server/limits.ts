@@ -5,18 +5,22 @@ import { MAX_PAGES } from "@/lib/server/pages";
 
 export const MAX_PAGE_DEPTH = 12;
 
+const PAGE_FULL = "This page is full — start a new page";
+const ACCOUNT_FULL = "You've reached the block limit for your account";
+
 export async function blockCapacityError(
   userId: string,
-  pageId: string,
+  target: { pageId: string | null; account: boolean },
   count: number,
-  scope: "page" | "page-and-account" = "page-and-account",
 ): Promise<string | null> {
   const [onPage, total] = await Promise.all([
-    Block.countDocuments({ userId, chatId: pageId, deletedAt: null }),
-    scope === "page" ? Promise.resolve(0) : Block.countDocuments({ userId }),
+    target.pageId
+      ? Block.countDocuments({ userId, chatId: target.pageId, deletedAt: null })
+      : Promise.resolve(0),
+    target.account ? Block.countDocuments({ userId }) : Promise.resolve(0),
   ]);
-  if (onPage + count > MAX_BLOCKS_PER_PAGE) return "This page is full — start a new page";
-  if (total + count > MAX_BLOCKS_PER_USER) return "You've reached the block limit for your account";
+  if (target.pageId && onPage + count > MAX_BLOCKS_PER_PAGE) return PAGE_FULL;
+  if (target.account && total + count > MAX_BLOCKS_PER_USER) return ACCOUNT_FULL;
   return null;
 }
 

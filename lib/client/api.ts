@@ -7,22 +7,38 @@ export class RequestError extends Error {
   }
 }
 
+export interface Snapshot<T> {
+  data: T;
+  requestedAt: number;
+}
+
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, { signal, cache: "no-store", credentials: "same-origin" });
   if (!response.ok) throw new RequestError(response.status);
   return (await response.json()) as T;
 }
 
-export async function fetchPageBlocks(pageId: string, signal?: AbortSignal): Promise<Block[]> {
+async function snapshot<T>(
+  url: string,
+  pick: (body: never) => T,
+  signal?: AbortSignal,
+): Promise<Snapshot<T>> {
   await syncQueue.idle();
-  const data = await getJson<{ blocks: Block[] }>(`/api/pages/${encodeURIComponent(pageId)}/blocks`, signal);
-  return data.blocks;
+  const requestedAt = Date.now();
+  const body = await getJson<never>(url, signal);
+  return { data: pick(body), requestedAt };
 }
 
-export async function fetchPages(signal?: AbortSignal): Promise<Page[]> {
-  await syncQueue.idle();
-  const data = await getJson<{ pages: Page[] }>("/api/pages", signal);
-  return data.pages;
+export function fetchPageBlocks(pageId: string, signal?: AbortSignal): Promise<Snapshot<Block[]>> {
+  return snapshot(
+    `/api/pages/${encodeURIComponent(pageId)}/blocks`,
+    (body: { blocks: Block[] }) => body.blocks,
+    signal,
+  );
+}
+
+export function fetchPages(signal?: AbortSignal): Promise<Snapshot<Page[]>> {
+  return snapshot("/api/pages", (body: { pages: Page[] }) => body.pages, signal);
 }
 
 export async function fetchTrash(signal?: AbortSignal): Promise<TrashedPage[]> {

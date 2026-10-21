@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import dbConnect from "@/lib/db";
 import { allowWrite, currentUserId } from "@/lib/server/auth";
+import { withUserLock } from "@/lib/server/locks";
 import { firstIssue } from "@/lib/validation";
 import type { ActionResult } from "@/lib/types";
 
@@ -23,7 +24,7 @@ export async function runWrite<Input, Result extends object>(
 
   try {
     await dbConnect();
-    return await handler(userId, parsed.data);
+    return await withUserLock(userId, () => handler(userId, parsed.data));
   } catch {
     return fail(failure);
   }

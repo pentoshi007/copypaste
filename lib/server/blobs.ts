@@ -1,5 +1,6 @@
 import Block from "@/models/Block";
 import { deleteObjects, getR2Config } from "@/lib/r2";
+import { destroyImages } from "@/lib/server/cloudinary";
 
 export interface BlobRefs {
   objectKeys: string[];
@@ -38,19 +39,11 @@ export function hasBlobs(refs: BlobRefs): boolean {
 }
 
 async function destroyBlobs(refs: BlobRefs): Promise<void> {
-  if (refs.objectKeys.length > 0) {
-    const config = getR2Config();
-    if (config) await deleteObjects(config, refs.objectKeys);
-  }
-
-  if (refs.publicIds.length > 0) {
-    try {
-      const cloudinary = (await import("cloudinary")).default;
-      for (let i = 0; i < refs.publicIds.length; i += 100) {
-        await cloudinary.v2.api.delete_resources(refs.publicIds.slice(i, i + 100)).catch(() => undefined);
-      }
-    } catch {}
-  }
+  const config = refs.objectKeys.length > 0 ? getR2Config() : null;
+  await Promise.allSettled([
+    config ? deleteObjects(config, refs.objectKeys) : Promise.resolve(),
+    destroyImages(refs.publicIds),
+  ]);
 }
 
 export async function releaseBlobs(userId: string, refs: BlobRefs): Promise<void> {

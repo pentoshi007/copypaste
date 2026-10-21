@@ -53,7 +53,7 @@ interface PageEditorProps {
   page: Page;
   pages: Page[];
   initialBlocks: Block[];
-  remote: { version: number; blocks: Block[] } | null;
+  remote: { version: number; blocks: Block[]; requestedAt: number } | null;
   autoFocusTitle: boolean;
   revealBlockId: string | null;
   onRevealed(): void;
@@ -62,6 +62,7 @@ interface PageEditorProps {
   onOpenPage(pageId: string): void;
   onBlocksMoved(targetPageId: string): void;
   onSnapshot(pageId: string, blocks: Block[]): void;
+  onConflict(pageId: string): void;
 }
 
 interface SlashState {
@@ -173,7 +174,11 @@ export default function PageEditor(props: PageEditorProps) {
 
   const autoTitleRef = useRef<(created: LocalBlock[]) => void>(() => undefined);
   const [store] = useState(
-    () => new BlockStore(page._id, props.initialBlocks, (created) => autoTitleRef.current(created)),
+    () =>
+      new BlockStore(page._id, props.initialBlocks, {
+        onCreated: (created) => autoTitleRef.current(created),
+        onConflict: () => latest.current.onConflict(latest.current.page._id),
+      }),
   );
 
   const blocks = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
@@ -549,9 +554,8 @@ export default function PageEditor(props: PageEditorProps) {
         if (!previous) return;
         if (hasEditableText(previous.type)) {
           const caret = previous.content.length;
-          store.update(previous.key, { content: previous.content + block.content });
-          store.remove([key], { undoable: false });
-          focusBlock(previous.key, caret);
+          if (store.merge(previous.key, key, previous.content + block.content))
+            focusBlock(previous.key, caret);
           return;
         }
         if (!block.content) {
@@ -566,9 +570,7 @@ export default function PageEditor(props: PageEditorProps) {
         const next = neighbor(key, 1);
         if (!block || !next || !hasEditableText(next.type)) return;
         const caret = block.content.length;
-        store.update(key, { content: block.content + next.content });
-        store.remove([next.key], { undoable: false });
-        focusBlock(key, caret);
+        if (store.merge(key, next.key, block.content + next.content)) focusBlock(key, caret);
       },
       indent,
       moveBy,
@@ -824,7 +826,7 @@ export default function PageEditor(props: PageEditorProps) {
 
   useEffect(() => {
     if (!remote) return;
-    store.replaceFromServer(remote.blocks, editingRef.current);
+    store.replaceFromServer(remote.blocks, editingRef.current, remote.requestedAt);
   }, [remote, store]);
 
   useEffect(() => {

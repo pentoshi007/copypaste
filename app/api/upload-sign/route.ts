@@ -1,5 +1,4 @@
 import { after } from "next/server";
-import { v2 as cloudinary } from "cloudinary";
 import dbConnect from "@/lib/db";
 import { rateLimit } from "@/lib/rateLimit";
 import {
@@ -9,6 +8,7 @@ import {
   attachmentKind,
 } from "@/lib/attachments";
 import { currentUserId } from "@/lib/server/auth";
+import { IMAGE_FORMATS, cloudinaryCredentials, signUploadParams } from "@/lib/server/cloudinary";
 import { isCrossSiteRequest, jsonError, jsonPrivate } from "@/lib/server/requests";
 import {
   uploadAllowance,
@@ -24,7 +24,13 @@ interface Sign {
   signature: string;
   timestamp: number;
   publicId: string;
+  params: Record<string, string>;
 }
+
+const SIGNED_PARAMS: Record<string, string> = {
+  overwrite: "false",
+  allowed_formats: IMAGE_FORMATS,
+};
 
 export async function POST(request: Request) {
   if (isCrossSiteRequest(request.headers)) return jsonError("Forbidden", 403);
@@ -32,10 +38,8 @@ export async function POST(request: Request) {
   const userId = await currentUserId();
   if (!userId) return jsonError("Unauthorized", 401);
 
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
-  const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
-  if (!apiKey || !apiSecret || !cloudName) return jsonError("Image uploads aren't configured", 503);
+  const credentials = cloudinaryCredentials();
+  if (!credentials) return jsonError("Image uploads aren't configured", 503);
 
   const raw = await request.json().catch(() => null);
   const files = (raw as { files?: unknown } | null)?.files;
@@ -82,20 +86,20 @@ export async function POST(request: Request) {
       const publicId = `u/${userId}/${crypto.randomUUID().replace(/-/g, "")}`;
       const timestamp = Math.round(Date.now() / 1000);
 
-      try {
-        const signature = cloudinary.utils.api_sign_request({ public_id: publicId, timestamp }, apiSecret);
-        budget -= MAX_IMAGE_BYTES;
-        planned.push({ kind: "image", key: publicId, size: MAX_IMAGE_BYTES });
-        signs.push({ index, signature, timestamp, publicId });
-      } catch {
+      const signature = signUploadParams({ ...SIGNED_PARAMS, public_id: publicId, timestamp });
+      if (!signature) {
         errors.push({ index, error: "Failed to authorize upload" });
+        continue;
       }
+      budget -= MAX_IMAGE_BYTES;
+      planned.push({ kind: "image", key: publicId, size: MAX_IMAGE_BYTES });
+      signs.push({ index, signature, timestamp, publicId, params: SIGNED_PARAMS });
     }
 
     await reserveUploads(userId, planned);
     after(sweepOrphanUploads);
 
-    return jsonPrivate({ signs, errors, apiKey, cloudName });
+    return jsonPrivate({ signs, errors, apiKey: credentials.apiKey, cloudName: credentials.cloudName });
   } catch {
     return jsonError("Failed to authorize upload", 500);
   }

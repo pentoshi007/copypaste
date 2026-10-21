@@ -91,7 +91,7 @@ function BlockRow({ block, number, editing, selected, highlighted }: BlockRowPro
   return (
     <div
       data-block-key={block.key}
-      data-block-id={block._id || undefined}
+      data-block-id={block._id}
       className={`group/block relative rounded-md transition-colors ${SPACING[block.type] ?? ""} ${
         selected ? "bg-blue-500/10 ring-1 ring-blue-400/40" : ""
       } ${highlighted ? "animate-highlight" : ""}`}

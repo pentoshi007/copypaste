@@ -6,7 +6,7 @@ import { releaseBlobs } from "@/lib/server/blobs";
 import type { AttachmentKind } from "@/lib/attachments";
 
 const DEFAULT_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
-const ORPHAN_TTL_MS = 60 * 60 * 1000;
+const ORPHAN_TTL_MS = 3 * 60 * 60 * 1000;
 const ORPHAN_SWEEP_INTERVAL = { maxAttempts: 1, windowMs: 10 * 60 * 1000 };
 const ORPHAN_SWEEP_BATCH = 500;
 const MAX_PENDING_UPLOADS = 100;

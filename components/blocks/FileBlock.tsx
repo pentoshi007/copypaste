@@ -15,7 +15,7 @@ const ACTION = "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-s
 export default function FileBlock({ block }: { block: LocalBlock }) {
   const [open, setOpen] = useState(false);
   const canEmbedPdf = usePdfEmbeddable();
-  const saved = Boolean(block._id) && !block.upload;
+  const saved = !block.pending && !block.upload;
 
   const kind = previewKind(block.mimeType, block.fileName);
   const extension = fileExtension(block.fileName);

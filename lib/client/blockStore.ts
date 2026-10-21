@@ -3,6 +3,7 @@ import {
   createBlocks,
   deleteBlocks,
   duplicateBlocks,
+  mergeBlocks,
   moveBlocks,
   moveBlocksToPage,
   restoreBlocks,
@@ -10,11 +11,18 @@ import {
   updateBlock,
 } from "@/actions/blocks";
 import { attachmentKind } from "@/lib/attachments";
-import { MAX_INDENT, type BlockColor, type BlockType } from "@/lib/editor/blockTypes";
-import { evenPositions, positionsBetween } from "@/lib/editor/position";
+import { generateObjectId } from "@/lib/client/objectId";
 import { reportFailure, syncQueue } from "@/lib/client/syncQueue";
+import {
+  MAX_CONTENT_LENGTH,
+  MAX_INDENT,
+  isMediaType,
+  type BlockColor,
+  type BlockType,
+} from "@/lib/editor/blockTypes";
+import { evenPositions, positionsBetween } from "@/lib/editor/position";
 import { splitSelection, uploadBatch, type UploadResult } from "@/lib/upload";
-import type { Block, BlockPatch, DuplicatePlacement, NewBlockInput } from "@/lib/types";
+import type { ActionResult, Block, BlockPatch, DuplicatePlacement, NewBlockInput } from "@/lib/types";
 
 export interface UploadState {
   file: File;
@@ -24,7 +32,7 @@ export interface UploadState {
   result: UploadResult | null;
 }
 
-export type LocalBlock = Block & { key: string; upload?: UploadState };
+export type LocalBlock = Block & { key: string; pending?: boolean; upload?: UploadState };
 
 export interface BlockDraft {
   type: BlockType;
@@ -42,17 +50,16 @@ export interface DropTarget {
   side: DropSide;
 }
 
+export interface BlockStoreEvents {
+  onCreated?(blocks: LocalBlock[]): void;
+  onConflict?(): void;
+}
+
 const SAVE_DEBOUNCE_MS = 450;
 const UPLOAD_CONCURRENCY = 3;
 const UNDO_TOAST_MS = 6000;
 const PREVIEW_RELEASE_MS = 30_000;
-
-let keySequence = 0;
-
-function nextKey(): string {
-  keySequence += 1;
-  return `local-${Date.now().toString(36)}-${keySequence}`;
-}
+const CREATE_RETRY_MS = 10_000;
 
 function clampIndent(indent: number): number {
   return Math.max(0, Math.min(MAX_INDENT, indent));
@@ -62,9 +69,9 @@ function fromServer(block: Block): LocalBlock {
   return { ...block, key: block._id };
 }
 
-function toBlock(block: LocalBlock, id: string): Block {
+function toBlock(block: LocalBlock): Block {
   return {
-    _id: id,
+    _id: block._id,
     pageId: block.pageId,
     type: block.type,
     content: block.content,
@@ -113,6 +120,7 @@ function currentValues(block: LocalBlock, dirty: BlockPatch): BlockPatch {
 function toInput(block: LocalBlock): NewBlockInput {
   const result = block.upload?.result;
   return {
+    _id: block._id,
     type: block.type,
     content: block.content,
     language: block.language,
@@ -129,6 +137,8 @@ function toInput(block: LocalBlock): NewBlockInput {
           imageUrl: result.imageUrl,
           publicId: result.publicId,
           storageKey: result.storageKey,
+          version: result.version,
+          signature: result.signature,
         }
       : undefined,
   };
@@ -159,19 +169,22 @@ function assignPositions(order: LocalBlock[], changed: ReadonlySet<string>) {
 
 export class BlockStore {
   private blocks: LocalBlock[];
-  private readonly ids = new Map<string, string>();
+  private readonly confirmed = new Set<string>();
   private readonly patches = new Map<string, BlockPatch>();
   private readonly timers = new Map<string, number>();
   private readonly uploads = new Map<string, AbortController>();
+  private readonly unsaved = new Set<string>();
   private readonly listeners = new Set<() => void>();
+  private retryTimer = 0;
+  private lastMutation = 0;
 
   constructor(
     readonly pageId: string,
     initial: Block[],
-    private readonly onCreated?: (blocks: LocalBlock[]) => void,
+    private readonly events: BlockStoreEvents = {},
   ) {
     this.blocks = initial.map(fromServer);
-    for (const block of initial) this.ids.set(block._id, block._id);
+    for (const block of initial) this.confirmed.add(block._id);
   }
 
   subscribe = (listener: () => void): (() => void) => {
@@ -185,36 +198,36 @@ export class BlockStore {
     return this.blocks.find((block) => block.key === key);
   }
 
+  isSaved(key: string): boolean {
+    return this.confirmed.has(key);
+  }
+
   hasPendingWork(): boolean {
     return (
       this.patches.size > 0 ||
       this.uploads.size > 0 ||
       syncQueue.isBusy() ||
-      this.blocks.some((block) => block.upload)
+      this.blocks.some((block) => block.pending && !block.upload?.error)
     );
   }
 
   savedBlocks(): Block[] {
-    return this.blocks.flatMap((block) => {
-      const id = this.ids.get(block.key);
-      return id && !block.upload ? [toBlock(block, id)] : [];
-    });
+    return this.blocks.filter((block) => this.confirmed.has(block.key) && !block.upload).map(toBlock);
   }
 
-  replaceFromServer(blocks: Block[], keepKey: string | null): boolean {
-    if (this.hasPendingWork()) return false;
-    const keysById = new Map<string, string>();
-    for (const [key, id] of this.ids) keysById.set(id, key);
+  replaceFromServer(blocks: Block[], keepKey: string | null, requestedAt: number): boolean {
+    if (this.hasPendingWork() || this.lastMutation >= requestedAt) return false;
     const local = keepKey ? this.find(keepKey) : undefined;
+    const localOnly = this.blocks.filter((block) => block.pending);
 
-    this.commit(
-      blocks.map((block) => {
-        const key = keysById.get(block._id) ?? block._id;
-        this.ids.set(key, block._id);
-        const next = { ...fromServer(block), key };
-        return local && key === local.key ? { ...next, content: local.content } : next;
-      }),
-    );
+    for (const block of blocks) this.confirmed.add(block._id);
+    const fresh = blocks.map((block) => {
+      const next = fromServer(block);
+      return local && next.key === local.key ? { ...next, content: local.content } : next;
+    });
+    const merged =
+      localOnly.length > 0 ? [...fresh, ...localOnly].sort((a, b) => a.position - b.position) : fresh;
+    this.commit(merged, false);
     return true;
   }
 
@@ -263,8 +276,7 @@ export class BlockStore {
   }
 
   update(key: string, patch: BlockPatch, options: { debounce?: boolean } = {}) {
-    const block = this.find(key);
-    if (!block) return;
+    if (!this.find(key)) return;
     this.commit(this.blocks.map((item) => (item.key === key ? applyPatch(item, patch) : item)));
     this.patches.set(key, { ...this.patches.get(key), ...patch });
 
@@ -283,17 +295,16 @@ export class BlockStore {
     window.clearTimeout(this.timers.get(key));
     this.timers.delete(key);
     const block = this.find(key);
-    if (block && !this.ids.has(key) && block.upload) return;
+    if (block?.pending && block.upload) return;
 
     const patch = this.patches.get(key);
     if (!patch) return;
     this.patches.delete(key);
 
     void syncQueue.enqueue(async () => {
-      const blockId = this.ids.get(key);
       const current = this.find(key);
-      if (!blockId || !current) return true;
-      return reportFailure(await updateBlock({ blockId, patch: currentValues(current, patch) }));
+      if (!current || !this.confirmed.has(key)) return true;
+      return this.settle(await updateBlock({ blockId: key, patch: currentValues(current, patch) }));
     });
   }
 
@@ -306,14 +317,17 @@ export class BlockStore {
     const removed = this.blocks.filter((block) => keySet.has(block.key));
     if (removed.length === 0) return;
 
-    for (const block of removed) this.flush(block.key);
+    for (const block of removed) {
+      if (this.confirmed.has(block.key)) this.flush(block.key);
+      this.forget(block.key);
+    }
     this.commit(this.blocks.filter((block) => !keySet.has(block.key)));
     for (const block of removed) this.discardUpload(block);
 
     void syncQueue.enqueue(async () => {
-      const blockIds = removed.flatMap((block) => this.ids.get(block.key) ?? []);
+      const blockIds = removed.map((block) => block.key).filter((key) => this.confirmed.has(key));
       if (blockIds.length === 0) return true;
-      return reportFailure(await deleteBlocks({ blockIds }));
+      return this.settle(await deleteBlocks({ blockIds }));
     });
 
     const restorable = removed.filter((block) => !block.upload);
@@ -323,6 +337,38 @@ export class BlockStore {
         action: { label: "Undo", onClick: () => this.restore(restorable) },
       });
     }
+  }
+
+  merge(targetKey: string, sourceKey: string, content: string): boolean {
+    const target = this.find(targetKey);
+    const source = this.find(sourceKey);
+    if (!target || !source || targetKey === sourceKey) return false;
+    if (content.length > MAX_CONTENT_LENGTH) {
+      toast.error("Those blocks are too long to merge");
+      return false;
+    }
+
+    this.flush(targetKey);
+    this.forget(sourceKey);
+    this.commit(
+      this.blocks
+        .filter((block) => block.key !== sourceKey)
+        .map((block) => (block.key === targetKey ? { ...block, content } : block)),
+    );
+
+    void syncQueue.enqueue(async () => {
+      const targetSaved = this.confirmed.has(targetKey);
+      const sourceSaved = this.confirmed.has(sourceKey);
+      const latest = this.find(targetKey)?.content ?? content;
+      if (targetSaved && sourceSaved) {
+        return this.settle(await mergeBlocks({ targetId: targetKey, sourceId: sourceKey, content: latest }));
+      }
+      if (targetSaved)
+        return this.settle(await updateBlock({ blockId: targetKey, patch: { content: latest } }));
+      if (sourceSaved) return this.settle(await deleteBlocks({ blockIds: [sourceKey] }));
+      return true;
+    });
+    return true;
   }
 
   move(keys: string[], target: DropTarget | null, rootIndent?: number) {
@@ -363,19 +409,19 @@ export class BlockStore {
   moveToPage(keys: string[], pageId: string): boolean {
     const keySet = new Set(keys);
     const moving = this.blocks.filter((block) => keySet.has(block.key));
-    if (moving.some((block) => block.upload && !this.ids.has(block.key))) {
-      toast.error("Wait for uploads to finish before moving them");
+    if (moving.length === 0) return false;
+    if (moving.some((block) => block.pending)) {
+      toast.error("Wait for these blocks to finish saving before moving them");
       return false;
     }
-    if (moving.length === 0) return false;
 
     for (const block of moving) this.flush(block.key);
     this.commit(this.blocks.filter((block) => !keySet.has(block.key)));
 
     void syncQueue.enqueue(async () => {
-      const blockIds = moving.flatMap((block) => this.ids.get(block.key) ?? []);
+      const blockIds = moving.map((block) => block.key).filter((key) => this.confirmed.has(key));
       if (blockIds.length === 0) return true;
-      return reportFailure(await moveBlocksToPage({ pageId, blockIds }));
+      return this.settle(await moveBlocksToPage({ pageId, blockIds }));
     });
     return true;
   }
@@ -384,63 +430,43 @@ export class BlockStore {
     const keySet = new Set(keys);
     const sources = this.blocks.filter((block) => keySet.has(block.key) && !block.upload);
     if (sources.length === 0) return [];
+    if (sources.some((block) => isMediaType(block.type) && !this.confirmed.has(block.key))) {
+      toast.error("Wait for uploads to finish before duplicating them");
+      return [];
+    }
     for (const source of sources) this.flush(source.key);
 
     const lastIndex = this.blocks.findIndex((block) => block.key === sources[sources.length - 1].key);
-    const copies = sources.map((source) => ({ ...source, key: nextKey(), _id: "" }));
-    const copyKeys = new Set(copies.map((copy) => copy.key));
-    const order = [...this.blocks.slice(0, lastIndex + 1), ...copies, ...this.blocks.slice(lastIndex + 1)];
+    const pairs = sources.map((source) => {
+      const id = generateObjectId();
+      return { source, copy: { ...source, _id: id, key: id, pending: true } as LocalBlock };
+    });
+    const copyKeys = new Set(pairs.map(({ copy }) => copy.key));
+    const order = [
+      ...this.blocks.slice(0, lastIndex + 1),
+      ...pairs.map(({ copy }) => copy),
+      ...this.blocks.slice(lastIndex + 1),
+    ];
 
     const { list, changed } = assignPositions(order, copyKeys);
     this.commit(list);
     this.persistPlacements([...changed].filter((key) => !copyKeys.has(key)));
 
-    void syncQueue.enqueue(
-      async () => {
-        const pairs = copies.flatMap((copy, index) => {
-          const blockId = this.ids.get(sources[index].key);
-          const current = this.find(copy.key);
-          return blockId && current ? [{ copy: current, blockId }] : [];
-        });
-        if (pairs.length === 0) {
-          this.dropLocal([...copyKeys]);
-          return true;
-        }
-        const placements: DuplicatePlacement[] = pairs.map(({ copy, blockId }) => ({
-          blockId,
-          position: copy.position,
-          indent: copy.indent,
-          content: copy.content,
-          language: copy.language,
-          checked: copy.checked,
-          collapsed: copy.collapsed,
-          color: copy.color,
-        }));
-        const result = await duplicateBlocks({ pageId: this.pageId, placements });
-        if (!result.ok) {
-          toast.error(result.error);
-          this.dropLocal([...copyKeys]);
-          return false;
-        }
-        this.adopt(
-          pairs.map(({ copy }) => copy.key),
-          result.blocks,
-        );
-        return true;
-      },
-      { idempotent: false },
-    );
-    return copies.map((copy) => copy.key);
+    const media = pairs.filter(({ source }) => isMediaType(source.type));
+    const plain = pairs.filter(({ source }) => !isMediaType(source.type));
+    if (plain.length > 0) this.persistCreation(plain.map(({ copy }) => copy.key));
+    if (media.length > 0)
+      this.persistDuplicates(media.map(({ source, copy }) => ({ sourceKey: source.key, copyKey: copy.key })));
+    return pairs.map(({ copy }) => copy.key);
   }
 
   ungroup(key: string) {
     const index = this.blocks.findIndex((block) => block.key === key);
     const group = this.blocks[index];
-    const blockId = this.ids.get(key);
-    if (!group || !blockId || group.type !== "group") return;
+    if (!group || group.type !== "group" || !this.confirmed.has(key)) return;
 
     const count = (group.attachments?.length ?? 0) + (group.content.trim() ? 1 : 0);
-    const placeholders = Array.from({ length: count }, () => ({ ...group, key: nextKey() }));
+    const placeholders = Array.from({ length: count }, (_, i) => ({ ...group, key: `${key}:${i}` }));
     const placeholderKeys = new Set(placeholders.map((placeholder) => placeholder.key));
     const order = [...this.blocks.slice(0, index), ...placeholders, ...this.blocks.slice(index + 1)];
     const { list, changed } = assignPositions(order, placeholderKeys);
@@ -455,12 +481,13 @@ export class BlockStore {
 
     void syncQueue.enqueue(
       async () => {
-        const result = await ungroupBlock({ blockId, positions });
+        const result = await ungroupBlock({ blockId: key, positions });
         if (!result.ok) {
           toast.error(result.error);
           return false;
         }
-        for (const block of result.blocks) this.ids.set(block._id, block._id);
+        for (const block of result.blocks) this.confirmed.add(block._id);
+        this.confirmed.delete(key);
         const at = this.blocks.findIndex((block) => block.key === key);
         if (at !== -1) {
           this.commit([
@@ -497,9 +524,11 @@ export class BlockStore {
 
   private blockFromDraft(draft: BlockDraft): LocalBlock {
     const now = new Date().toISOString();
+    const id = generateObjectId();
     return {
-      _id: "",
-      key: nextKey(),
+      _id: id,
+      key: id,
+      pending: true,
       pageId: this.pageId,
       type: draft.type,
       content: draft.content ?? "",
@@ -519,9 +548,23 @@ export class BlockStore {
     };
   }
 
-  private commit(next: LocalBlock[]) {
+  private commit(next: LocalBlock[], userChange = true) {
     this.blocks = next;
+    if (userChange) this.lastMutation = Date.now();
     for (const listener of this.listeners) listener();
+  }
+
+  private settle(result: ActionResult): boolean {
+    if (result.ok) return true;
+    reportFailure(result);
+    this.events.onConflict?.();
+    return false;
+  }
+
+  private forget(key: string) {
+    window.clearTimeout(this.timers.get(key));
+    this.timers.delete(key);
+    this.patches.delete(key);
   }
 
   private insertLocal(created: LocalBlock[], afterKey: string | null): string[] {
@@ -541,7 +584,10 @@ export class BlockStore {
       async () => {
         const targets = keys
           .map((key) => this.find(key))
-          .filter((block): block is LocalBlock => Boolean(block) && !this.ids.has((block as LocalBlock).key));
+          .filter(
+            (block): block is LocalBlock =>
+              Boolean(block?.pending) && (!block?.upload || Boolean(block.upload.result)),
+          );
         if (targets.length === 0) return true;
         for (const target of targets) this.patches.delete(target.key);
 
@@ -551,37 +597,102 @@ export class BlockStore {
           this.dropLocal(targets.map((target) => target.key));
           return false;
         }
-        this.adopt(
-          targets.map((target) => target.key),
-          result.blocks,
-        );
+        this.adopt(result.blocks);
         return true;
       },
-      { idempotent: false },
+      { onGiveUp: () => this.retryLater(keys) },
     );
+  }
+
+  private persistDuplicates(pairs: { sourceKey: string; copyKey: string }[]) {
+    const copyKeys = pairs.map((pair) => pair.copyKey);
+    void syncQueue.enqueue(
+      async () => {
+        const placements: DuplicatePlacement[] = pairs.flatMap(({ sourceKey, copyKey }) => {
+          const copy = this.find(copyKey);
+          if (!copy?.pending || !this.confirmed.has(sourceKey)) return [];
+          return [
+            {
+              blockId: sourceKey,
+              newId: copyKey,
+              position: copy.position,
+              indent: copy.indent,
+              content: copy.content,
+              language: copy.language,
+              checked: copy.checked,
+              collapsed: copy.collapsed,
+              color: copy.color,
+            },
+          ];
+        });
+        if (placements.length === 0) {
+          this.dropLocal(copyKeys.filter((key) => this.find(key)?.pending));
+          return true;
+        }
+        for (const placement of placements) this.patches.delete(placement.newId);
+
+        const result = await duplicateBlocks({ pageId: this.pageId, placements });
+        if (!result.ok) {
+          toast.error(result.error);
+          this.dropLocal(copyKeys);
+          return false;
+        }
+        this.adopt(result.blocks);
+        return true;
+      },
+      { onGiveUp: () => this.retryDuplicatesLater(pairs) },
+    );
+  }
+
+  private retryLater(keys: string[]) {
+    for (const key of keys) {
+      if (this.find(key)?.pending && !this.unsaved.has(key)) {
+        this.unsaved.add(key);
+        syncQueue.setUnsaved(1);
+      }
+    }
+    this.scheduleRetry();
+  }
+
+  private retryDuplicatesLater(pairs: { sourceKey: string; copyKey: string }[]) {
+    window.setTimeout(() => this.persistDuplicates(pairs), CREATE_RETRY_MS);
+  }
+
+  private scheduleRetry() {
+    if (this.retryTimer || this.unsaved.size === 0) return;
+    const retry = () => {
+      window.removeEventListener("online", retry);
+      window.clearTimeout(this.retryTimer);
+      this.retryTimer = 0;
+      const keys = [...this.unsaved];
+      this.unsaved.clear();
+      syncQueue.setUnsaved(-keys.length);
+      this.persistCreation(keys);
+    };
+    window.addEventListener("online", retry);
+    this.retryTimer = window.setTimeout(retry, CREATE_RETRY_MS);
   }
 
   private persistPlacements(keys: string[]) {
     if (keys.length === 0) return;
     void syncQueue.enqueue(async () => {
       const placements = keys.flatMap((key) => {
-        const blockId = this.ids.get(key);
         const block = this.find(key);
-        return blockId && block ? [{ blockId, position: block.position, indent: block.indent }] : [];
+        return block && this.confirmed.has(key)
+          ? [{ blockId: key, position: block.position, indent: block.indent }]
+          : [];
       });
       if (placements.length === 0) return true;
-      return reportFailure(await moveBlocks({ pageId: this.pageId, placements }));
+      return this.settle(await moveBlocks({ pageId: this.pageId, placements }));
     });
   }
 
-  private adopt(keys: string[], saved: Block[]) {
-    const byKey = new Map<string, Block>();
-    keys.forEach((key, index) => {
-      const block = saved[index];
-      if (!block) return;
-      this.ids.set(key, block._id);
-      byKey.set(key, block);
-    });
+  private adopt(saved: Block[]) {
+    const byKey = new Map(saved.map((block) => [block._id, block]));
+    for (const block of saved) {
+      this.confirmed.add(block._id);
+      if (this.unsaved.delete(block._id)) syncQueue.setUnsaved(-1);
+    }
 
     const created: LocalBlock[] = [];
     this.commit(
@@ -594,7 +705,7 @@ export class BlockStore {
         }
         const next: LocalBlock = {
           ...block,
-          _id: server._id,
+          pending: false,
           createdAt: server.createdAt,
           updatedAt: server.updatedAt,
           imageUrl: server.imageUrl,
@@ -608,34 +719,41 @@ export class BlockStore {
         created.push(next);
         return next;
       }),
+      false,
     );
 
-    for (const key of keys) if (this.patches.has(key)) this.flush(key);
-    if (created.length > 0) this.onCreated?.(created);
+    for (const block of saved) if (this.patches.has(block._id)) this.flush(block._id);
+    if (created.length > 0) this.events.onCreated?.(created);
   }
 
   private dropLocal(keys: string[]) {
+    if (keys.length === 0) return;
     const keySet = new Set(keys);
-    for (const block of this.blocks) if (keySet.has(block.key)) this.discardUpload(block);
+    for (const block of this.blocks) {
+      if (!keySet.has(block.key)) continue;
+      this.discardUpload(block);
+      this.forget(block.key);
+      if (this.unsaved.delete(block.key)) syncQueue.setUnsaved(-1);
+    }
     this.commit(this.blocks.filter((block) => !keySet.has(block.key)));
   }
 
   private restore(removed: LocalBlock[]) {
     const present = new Set(this.blocks.map((block) => block.key));
-    const restorable = removed.filter((block) => this.ids.has(block.key) && !present.has(block.key));
+    const restorable = removed.filter((block) => this.confirmed.has(block.key) && !present.has(block.key));
     if (restorable.length === 0) return;
 
     this.commit([...this.blocks, ...restorable].sort((a, b) => a.position - b.position));
-    void syncQueue.enqueue(async () => {
-      const blockIds = restorable.flatMap((block) => this.ids.get(block.key) ?? []);
-      return reportFailure(await restoreBlocks({ blockIds }));
-    });
+    void syncQueue.enqueue(async () =>
+      this.settle(await restoreBlocks({ blockIds: restorable.map((block) => block.key) })),
+    );
   }
 
   private discardUpload(block: LocalBlock) {
     this.uploads.get(block.key)?.abort();
     this.uploads.delete(block.key);
-    if (block.upload?.previewUrl && !this.ids.has(block.key)) URL.revokeObjectURL(block.upload.previewUrl);
+    if (block.upload?.previewUrl && !this.confirmed.has(block.key))
+      URL.revokeObjectURL(block.upload.previewUrl);
   }
 
   private setUpload(key: string, patch: Partial<UploadState>) {
@@ -643,6 +761,7 @@ export class BlockStore {
       this.blocks.map((block) =>
         block.key === key && block.upload ? { ...block, upload: { ...block.upload, ...patch } } : block,
       ),
+      false,
     );
   }
 

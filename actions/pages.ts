@@ -6,13 +6,19 @@ import Block from "@/models/Block";
 import PageModel from "@/models/Page";
 import { isAllowedPageIcon } from "@/lib/editor/emoji";
 import { MAX_TITLE_LENGTH } from "@/lib/editor/titles";
+import { MAX_BLOCKS_PER_PAGE } from "@/lib/editor/blockTypes";
 import { ancestorsOf, descendantIds, placeAmong, wouldCreateCycle } from "@/lib/editor/pageTree";
 import { objectId } from "@/lib/validation";
 import { fail, runWrite } from "@/lib/server/actions";
 import { releaseBlobs, hasBlobs } from "@/lib/server/blobs";
 import { copyBlockFields } from "@/lib/server/blockCopy";
 import { MAX_PAGE_DEPTH, blockCapacityError, pageCapacityError } from "@/lib/server/limits";
-import { createPageDocument, listTreeRows, removePagesPermanently } from "@/lib/server/pages";
+import {
+  createPageDocument,
+  ensureBlockPositions,
+  listTreeRows,
+  removePagesPermanently,
+} from "@/lib/server/pages";
 import { PAGE_PROJECTION, serializePage } from "@/lib/server/serialize";
 import type { ActionResult, Page, PagePatch, PagePosition } from "@/lib/types";
 
@@ -109,12 +115,16 @@ export async function movePage(input: {
       if (parentId && !rows.some((row) => row._id === parentId)) return fail("Destination not found");
       if (wouldCreateCycle(rows, pageId, parentId)) return fail("A page can't be moved inside itself");
 
-      const depthBelow = (id: string): number => {
+      const depthBelow = (id: string, seen: Set<string>): number => {
+        if (seen.has(id)) return MAX_PAGE_DEPTH;
+        seen.add(id);
         const children = rows.filter((row) => row.parentId === id);
-        return children.length === 0 ? 0 : 1 + Math.max(...children.map((child) => depthBelow(child._id)));
+        return children.length === 0
+          ? 0
+          : 1 + Math.max(...children.map((child) => depthBelow(child._id, seen)));
       };
       const parentDepth = parentId ? ancestorsOf(rows, parentId).length + 1 : 0;
-      if (parentDepth + 1 + depthBelow(pageId) > MAX_PAGE_DEPTH) {
+      if (parentDepth + 1 + depthBelow(pageId, new Set()) > MAX_PAGE_DEPTH) {
         return fail("Pages can't be nested any deeper");
       }
 
@@ -139,6 +149,12 @@ export async function movePage(input: {
         ],
         { ordered: true },
       );
+      const after = await listTreeRows(userId);
+      if (wouldCreateCycle(after, pageId, parentId)) {
+        const previous = rows.find((row) => row._id === pageId)?.parentId ?? null;
+        await PageModel.updateOne({ _id: pageId, userId }, { $set: { parentId: previous } });
+        return fail("A page can't be moved inside itself");
+      }
       return { ok: true, position: placement.position, rebalanced: placement.rebalanced };
     },
     "Failed to move page",
@@ -161,10 +177,12 @@ export async function duplicatePage(input: {
       const pageCapacity = await pageCapacityError(userId);
       if (pageCapacity) return fail(pageCapacity);
 
+      await ensureBlockPositions(userId, pageId);
       const blocks = await Block.find({ userId, chatId: pageId, deletedAt: null })
         .sort({ position: 1 })
+        .limit(MAX_BLOCKS_PER_PAGE)
         .lean<Raw[]>();
-      const blockCapacity = await blockCapacityError(userId, pageId, blocks.length, "page-and-account");
+      const blockCapacity = await blockCapacityError(userId, { pageId: null, account: true }, blocks.length);
       if (blockCapacity) return fail(blockCapacity);
 
       const original = serializePage(source);

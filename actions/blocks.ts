@@ -54,9 +54,12 @@ const attachmentSchema = z.object({
   imageUrl: z.string().max(2048).optional(),
   publicId: z.string().max(256).optional(),
   storageKey: z.string().max(512).optional(),
+  version: z.number().int().nonnegative().optional(),
+  signature: z.string().max(128).optional(),
 });
 
 const newBlockSchema = z.object({
+  _id: objectId,
   type: z.enum(BLOCK_TYPES),
   content: z.string().max(MAX_CONTENT_LENGTH, "Block is too long"),
   language: z.string().max(MAX_LANGUAGE_LENGTH),
@@ -69,7 +72,11 @@ const newBlockSchema = z.object({
 
 const createSchema = z.object({
   pageId: objectId,
-  blocks: z.array(newBlockSchema).min(1).max(MAX_BLOCKS_PER_REQUEST),
+  blocks: z
+    .array(newBlockSchema)
+    .min(1)
+    .max(MAX_BLOCKS_PER_REQUEST)
+    .refine((items) => new Set(items.map((item) => item._id)).size === items.length, "Duplicate block ids"),
 });
 
 const patchSchema = z.object({
@@ -97,6 +104,7 @@ const idsSchema = z.object({ blockIds });
 
 const duplicatePlacementSchema = z.object({
   blockId: objectId,
+  newId: objectId,
   position,
   indent,
   content: z.string().max(MAX_CONTENT_LENGTH, "Block is too long"),
@@ -111,6 +119,12 @@ const duplicateSchema = z.object({
   placements: z.array(duplicatePlacementSchema).min(1).max(MAX_BLOCKS_PER_REQUEST),
 });
 
+const mergeSchema = z.object({
+  targetId: objectId,
+  sourceId: objectId,
+  content: z.string().max(MAX_CONTENT_LENGTH, "The merged block would be too long"),
+});
+
 const captionSchema = z.object({
   blockId: objectId,
   index: z.number().int().nonnegative().max(1000),
@@ -123,6 +137,36 @@ const ungroupSchema = z.object({
 });
 
 type BlocksResult = ActionResult<{ blocks: BlockItem[] }>;
+
+function isDuplicateKey(error: unknown): boolean {
+  const code = (error as { code?: number })?.code;
+  const writeErrors = (error as { writeErrors?: { code?: number }[] })?.writeErrors;
+  return code === 11000 || Boolean(writeErrors?.length && writeErrors.every((item) => item.code === 11000));
+}
+
+async function existingIds(userId: string, pageId: string, ids: string[]): Promise<Set<string> | null> {
+  const existing = await Block.find({ _id: { $in: ids } }, { userId: 1, chatId: 1 }).lean<Raw[]>();
+  if (existing.some((doc) => String(doc.userId) !== userId || String(doc.chatId) !== pageId)) return null;
+  return new Set(existing.map((doc) => String(doc._id)));
+}
+
+async function insertMissing(docs: Raw[]): Promise<void> {
+  if (docs.length === 0) return;
+  try {
+    await Block.insertMany(docs, { ordered: false });
+  } catch (error) {
+    if (!isDuplicateKey(error)) throw error;
+  }
+}
+
+async function loadInOrder(userId: string, pageId: string, ids: string[]): Promise<BlockItem[] | null> {
+  const saved = await Block.find({ _id: { $in: ids }, userId, chatId: pageId }, BLOCK_PROJECTION).lean<
+    Raw[]
+  >();
+  if (saved.length !== ids.length) return null;
+  const byId = new Map(saved.map((doc) => [String(doc._id), doc]));
+  return ids.map((id) => serializeBlock(byId.get(id) as Raw));
+}
 
 function contentFor(type: BlockType, content: string): string | { error: string } {
   if (type === "divider") return "";
@@ -175,6 +219,7 @@ async function prepareBlock(
   if (typeof content !== "string") return { ok: false, error: content.error };
 
   const base: Raw = {
+    _id: input._id,
     type: input.type,
     content,
     language: input.type === "code" ? input.language : "",
@@ -213,35 +258,43 @@ export async function createBlocks(input: {
     async (userId, { pageId, blocks }) => {
       if (!(await touchActivePage(userId, pageId))) return fail("Page not found");
 
-      const capacity = await blockCapacityError(userId, pageId, blocks.length);
-      if (capacity) return fail(capacity);
+      const ids = blocks.map((block) => block._id);
+      const known = await existingIds(userId, pageId, ids);
+      if (!known) return fail("Those blocks couldn't be saved");
+      const missing = blocks.filter((block) => !known.has(block._id));
 
-      const prepared = await Promise.all(blocks.map((block) => prepareBlock(block, userId)));
-      const failure = prepared.find((result) => !result.ok);
-      if (failure && !failure.ok) {
-        scheduleOrphanCleanup(
-          userId,
-          prepared.flatMap((result) => (!result.ok && result.orphan ? [result.orphan] : [])),
+      if (missing.length > 0) {
+        const capacity = await blockCapacityError(userId, { pageId, account: true }, missing.length);
+        if (capacity) return fail(capacity);
+
+        const prepared = await Promise.all(missing.map((block) => prepareBlock(block, userId)));
+        const failure = prepared.find((result) => !result.ok);
+        if (failure && !failure.ok) {
+          scheduleOrphanCleanup(
+            userId,
+            prepared.flatMap((result) => (!result.ok && result.orphan ? [result.orphan] : [])),
+          );
+          return fail(failure.error);
+        }
+
+        const now = new Date();
+        await insertMissing(
+          prepared.map((result) => ({
+            ...(result.ok ? result.doc : {}),
+            userId,
+            chatId: pageId,
+            createdAt: now,
+            updatedAt: now,
+          })),
         );
-        return fail(failure.error);
+        await consumeUploads(
+          userId,
+          prepared.flatMap((result) => (result.ok && result.reservedKey ? [result.reservedKey] : [])),
+        );
       }
 
-      const now = new Date();
-      const docs = prepared.map((result) => ({
-        ...(result.ok ? result.doc : {}),
-        userId,
-        chatId: pageId,
-        createdAt: now,
-        updatedAt: now,
-      }));
-      const created = await Block.insertMany(docs);
-
-      await consumeUploads(
-        userId,
-        prepared.flatMap((result) => (result.ok && result.reservedKey ? [result.reservedKey] : [])),
-      );
-
-      return { ok: true, blocks: created.map((doc) => serializeBlock(doc.toObject())) };
+      const created = await loadInOrder(userId, pageId, ids);
+      return created ? { ok: true, blocks: created } : fail("Those blocks couldn't be saved");
     },
     "Failed to save",
   );
@@ -325,13 +378,12 @@ export async function moveBlocksToPage(input: { pageId: string; blockIds: string
     async (userId, { pageId, blockIds: ids }) => {
       if (!(await touchActivePage(userId, pageId))) return fail("Page not found");
 
-      const capacity = await blockCapacityError(userId, pageId, ids.length, "page");
-      if (capacity) return fail(capacity);
-
       const sources = await Block.find(
-        { _id: { $in: ids }, userId, deletedAt: null },
+        { _id: { $in: ids }, userId, deletedAt: null, chatId: { $ne: pageId } },
         { _id: 1, indent: 1 },
       ).lean<Raw[]>();
+      const capacity = await blockCapacityError(userId, { pageId, account: false }, sources.length);
+      if (capacity) return fail(capacity);
       const byId = new Map(sources.map((source) => [String(source._id), source]));
       const ordered = ids.map((id) => byId.get(id)).filter((source): source is Raw => Boolean(source));
       if (ordered.length === 0) return fail("Blocks not found");
@@ -385,12 +437,26 @@ export async function restoreBlocks(input: { blockIds: string[] }): Promise<Acti
     idsSchema,
     input,
     async (userId, { blockIds: ids }) => {
-      const blocks = await Block.find({ _id: { $in: ids }, userId }, { chatId: 1 }).lean<Raw[]>();
-      const pageIds = [...new Set(blocks.map((block) => String(block.chatId)))];
+      const blocks = await Block.find(
+        { _id: { $in: ids }, userId, deletedAt: { $ne: null } },
+        { chatId: 1 },
+      ).lean<Raw[]>();
+      const perPage = new Map<string, number>();
+      for (const block of blocks)
+        perPage.set(String(block.chatId), (perPage.get(String(block.chatId)) ?? 0) + 1);
+
       const activePages = await PageModel.find(
-        { _id: { $in: pageIds }, userId, deletedAt: null },
+        { _id: { $in: [...perPage.keys()] }, userId, deletedAt: null },
         { _id: 1 },
       ).lean<Raw[]>();
+      for (const page of activePages) {
+        const capacity = await blockCapacityError(
+          userId,
+          { pageId: String(page._id), account: false },
+          perPage.get(String(page._id)) ?? 0,
+        );
+        if (capacity) return fail(capacity);
+      }
 
       await Block.updateMany(
         { _id: { $in: ids }, userId, chatId: { $in: activePages.map((page) => page._id) } },
@@ -412,7 +478,13 @@ export async function duplicateBlocks(input: {
     async (userId, { pageId, placements }) => {
       if (!(await touchActivePage(userId, pageId))) return fail("Page not found");
 
-      const capacity = await blockCapacityError(userId, pageId, placements.length);
+      const ids = placements.map((placement) => placement.newId);
+      if (new Set(ids).size !== ids.length) return fail("Duplicate block ids");
+      const known = await existingIds(userId, pageId, ids);
+      if (!known) return fail("Those blocks couldn't be saved");
+      const missing = placements.filter((placement) => !known.has(placement.newId));
+
+      const capacity = await blockCapacityError(userId, { pageId, account: true }, missing.length);
       if (capacity) return fail(capacity);
 
       const sources = await Block.find({
@@ -425,7 +497,7 @@ export async function duplicateBlocks(input: {
 
       const now = new Date();
       const docs: Raw[] = [];
-      for (const placement of placements) {
+      for (const placement of missing) {
         const source = byId.get(placement.blockId);
         if (!source) return fail("Some blocks no longer exist");
         const type = source.type as BlockType;
@@ -433,6 +505,7 @@ export async function duplicateBlocks(input: {
         if (typeof content !== "string") return fail(content.error);
         docs.push({
           ...copyBlockFields(source),
+          _id: placement.newId,
           userId,
           chatId: pageId,
           content,
@@ -448,10 +521,41 @@ export async function duplicateBlocks(input: {
         });
       }
 
-      const created = await Block.insertMany(docs);
-      return { ok: true, blocks: created.map((doc) => serializeBlock(doc.toObject())) };
+      await insertMissing(docs);
+      const created = await loadInOrder(userId, pageId, ids);
+      return created ? { ok: true, blocks: created } : fail("Those blocks couldn't be saved");
     },
     "Failed to duplicate",
+  );
+}
+
+export async function mergeBlocks(input: {
+  targetId: string;
+  sourceId: string;
+  content: string;
+}): Promise<ActionResult> {
+  return runWrite(
+    mergeSchema,
+    input,
+    async (userId, { targetId, sourceId, content }) => {
+      if (targetId === sourceId) return fail("Invalid merge");
+      const [target, source] = await Promise.all([
+        Block.findOne({ _id: targetId, userId, deletedAt: null }, { type: 1, chatId: 1 }).lean<Raw>(),
+        Block.findOne({ _id: sourceId, userId, deletedAt: null }, { chatId: 1 }).lean<Raw>(),
+      ]);
+      if (!target || !source || String(target.chatId) !== String(source.chatId))
+        return fail("Block not found");
+
+      const merged = contentFor(target.type as BlockType, content);
+      if (typeof merged !== "string") return fail(merged.error);
+
+      const now = new Date();
+      await Block.updateOne({ _id: targetId, userId }, { $set: { content: merged, updatedAt: now } });
+      await Block.updateOne({ _id: sourceId, userId, deletedAt: null }, { $set: { deletedAt: now } });
+      await touchActivePage(userId, String(target.chatId));
+      return { ok: true };
+    },
+    "Failed to merge blocks",
   );
 }
 
@@ -491,7 +595,11 @@ export async function ungroupBlock(input: { blockId: string; positions: number[]
       const expected = attachments.length + (caption ? 1 : 0);
       if (positions.length !== expected) return fail("The group changed — reload and try again");
 
-      const capacity = await blockCapacityError(userId, String(group.chatId), expected - 1);
+      const capacity = await blockCapacityError(
+        userId,
+        { pageId: String(group.chatId), account: true },
+        Math.max(0, expected - 1),
+      );
       if (capacity) return fail(capacity);
 
       const now = new Date();

@@ -8,6 +8,8 @@ export type AttachmentRef = {
   imageUrl?: string;
   publicId?: string;
   storageKey?: string;
+  version?: number;
+  signature?: string;
   caption?: string;
 };
 

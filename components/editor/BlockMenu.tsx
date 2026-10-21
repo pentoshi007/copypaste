@@ -51,7 +51,7 @@ export default function BlockMenu({
   const [view, setView] = useState<View>("main");
   const multiple = count > 1;
   const convertible = isConvertible(block.type);
-  const saved = Boolean(block._id) && !block.upload;
+  const saved = !block.pending && !block.upload;
 
   const back = (
     <button

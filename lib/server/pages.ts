@@ -61,44 +61,54 @@ export async function listTreeRows(userId: string): Promise<TreeRow[]> {
   }));
 }
 
+const BACKFILL_BATCH = 1000;
+
+async function writePositions(
+  model: typeof Block,
+  userId: string,
+  rows: { _id: unknown; position: number }[],
+) {
+  for (let i = 0; i < rows.length; i += BACKFILL_BATCH) {
+    await model.bulkWrite(
+      rows.slice(i, i + BACKFILL_BATCH).map((row) => ({
+        updateOne: { filter: { _id: row._id, userId }, update: { $set: { position: row.position } } },
+      })),
+      { ordered: false },
+    );
+  }
+}
+
 async function backfillBlockPositions(userId: string, pageId: string): Promise<void> {
-  const docs = await Block.find(
-    { userId, chatId: pageId, deletedAt: null },
-    { _id: 1, position: 1, createdAt: 1 },
-  )
+  const docs = await Block.find({ userId, chatId: pageId }, { _id: 1, position: 1, createdAt: 1 })
     .sort({ createdAt: 1 })
-    .limit(MAX_BLOCKS_PER_PAGE)
     .lean<Raw[]>();
 
   const legacy = docs.filter((doc) => typeof doc.position !== "number");
+  if (legacy.length === 0) return;
   const positioned = docs
     .filter((doc) => typeof doc.position === "number")
     .sort((a, b) => (a.position as number) - (b.position as number));
   const ordered = [...legacy, ...positioned];
   const positions = evenPositions(ordered.length);
 
-  await Block.bulkWrite(
-    ordered.map((doc, index) => ({
-      updateOne: {
-        filter: { _id: doc._id, userId },
-        update: { $set: { position: positions[index] } },
-      },
-    })),
+  await writePositions(
+    Block,
+    userId,
+    ordered.map((doc, index) => ({ _id: doc._id, position: positions[index] })),
   );
 }
 
-export async function loadPageBlocks(userId: string, pageId: string): Promise<BlockItem[]> {
-  const load = () =>
-    Block.find({ userId, chatId: pageId, deletedAt: null }, BLOCK_PROJECTION)
-      .sort({ position: 1, createdAt: 1 })
-      .limit(MAX_BLOCKS_PER_PAGE)
-      .lean<Raw[]>();
+export async function ensureBlockPositions(userId: string, pageId: string): Promise<void> {
+  const unpositioned = await Block.exists({ userId, chatId: pageId, position: { $exists: false } });
+  if (unpositioned) await backfillBlockPositions(userId, pageId);
+}
 
-  let docs = await load();
-  if (docs.some((doc) => typeof doc.position !== "number")) {
-    await backfillBlockPositions(userId, pageId);
-    docs = await load();
-  }
+export async function loadPageBlocks(userId: string, pageId: string): Promise<BlockItem[]> {
+  await ensureBlockPositions(userId, pageId);
+  const docs = await Block.find({ userId, chatId: pageId, deletedAt: null }, BLOCK_PROJECTION)
+    .sort({ position: 1, createdAt: 1 })
+    .limit(MAX_BLOCKS_PER_PAGE)
+    .lean<Raw[]>();
   return docs.map(serializeBlock);
 }
 

@@ -66,6 +66,9 @@ export default function ImageBlock({ block }: { block: LocalBlock }) {
   const full = remote ? cloudinaryTransform(remote, "f_auto,q_auto") : source;
   const alt = block.content || block.fileName || "Image";
   const close = useCallback(() => setOpen(false), []);
+  const watchLoad = useCallback((image: HTMLImageElement | null) => {
+    if (image?.complete && image.naturalWidth > 0) setLoaded(true);
+  }, []);
 
   const copyImage = async () => {
     setBusy("copy");
@@ -117,6 +120,7 @@ export default function ImageBlock({ block }: { block: LocalBlock }) {
             className="block w-full cursor-zoom-in"
           >
             <img
+              ref={watchLoad}
               src={thumbnail}
               srcSet={remote ? `${thumbnail} 1x, ${thumbnail2x} 2x` : undefined}
               alt={alt}
