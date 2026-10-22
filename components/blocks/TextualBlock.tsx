@@ -320,7 +320,7 @@ export default function TextualBlock({ block, number, editing }: TextualBlockPro
   if (type === "callout") {
     return (
       <div
-        className={`flex gap-2 rounded-lg px-3 py-3 ${
+        className={`flex gap-2 rounded-lg border border-neutral-200 py-3 pl-3 pr-10 transition-colors hover:border-neutral-300 focus-within:border-blue-400 dark:border-neutral-800 dark:hover:border-neutral-700 dark:focus-within:border-blue-500 ${
           block.color === "default" ? "bg-neutral-100 dark:bg-neutral-800/70" : color.background
         }`}
       >

@@ -30,10 +30,10 @@ const SPACING: Partial<Record<BlockType, string>> = {
 };
 
 const GUTTER_OFFSET: Partial<Record<BlockType, string>> = {
-  h1: "top-1.5",
-  h2: "top-1",
-  h3: "top-0.5",
-  callout: "top-3",
+  h1: "top-3.5",
+  h2: "top-3",
+  h3: "top-2.5",
+  callout: "top-3.5",
   code: "top-1",
 };
 
@@ -86,13 +86,15 @@ function BlockBody({ block, number, editing }: { block: LocalBlock; number: numb
 function BlockRow({ block, number, editing, selected, highlighted }: BlockRowProps) {
   const api = useEditor();
   const showCopy = COPYABLE.has(block.type) && block.content.trim().length > 0;
-  const gutterTop = GUTTER_OFFSET[block.type] ?? "top-0.5";
+  const framed =
+    (COPYABLE.has(block.type) && block.type !== "callout") || block.type === "divider";
+  const gutterTop = GUTTER_OFFSET[block.type] ?? (framed ? "top-2.5" : "top-0.5");
 
   return (
     <div
       data-block-key={block.key}
       data-block-id={block._id}
-      className={`group/block relative rounded-md transition-colors ${SPACING[block.type] ?? ""} ${
+      className={`group/block relative rounded-md transition-colors ${SPACING[block.type] ?? "my-1"} ${
         selected ? "bg-blue-500/10 ring-1 ring-blue-400/40" : ""
       } ${highlighted ? "animate-highlight" : ""}`}
       style={{ paddingLeft: block.indent * INDENT_PX }}
@@ -101,12 +103,12 @@ function BlockRow({ block, number, editing, selected, highlighted }: BlockRowPro
       }}
     >
       <div
-        className={`absolute ${gutterTop} flex items-center gap-0.5 opacity-0 transition-opacity group-hover/block:opacity-100 pointer-coarse:opacity-60 ${
+        className={`pointer-events-none absolute ${gutterTop} flex items-center gap-0.5 opacity-0 transition-opacity group-hover/block:opacity-100 group-focus-within/block:opacity-100 pointer-coarse:opacity-60 ${
           selected ? "opacity-100" : ""
         }`}
         style={{ left: block.indent * INDENT_PX }}
       >
-        <div className="flex -translate-x-full items-center pr-1">
+        <div className="pointer-events-auto flex -translate-x-full items-center pr-1">
           <button
             type="button"
             aria-label="Add block below"
@@ -129,13 +131,22 @@ function BlockRow({ block, number, editing, selected, highlighted }: BlockRowPro
         </div>
       </div>
 
-      <div className={`min-w-0 ${showCopy ? "pr-8" : ""}`}>
+      <div
+        className={`min-w-0 ${
+          framed
+            ? "rounded-lg border border-neutral-200 px-3 py-2 transition-colors hover:border-neutral-300 focus-within:border-blue-400 dark:border-neutral-800 dark:hover:border-neutral-700 dark:focus-within:border-blue-500"
+            : ""
+        } ${showCopy && framed ? "pr-10" : ""}`}
+        onClick={(event) => {
+          if (framed && event.target === event.currentTarget) api.select(block.key, event.shiftKey);
+        }}
+      >
         <BlockBody block={block} number={number} editing={editing} />
       </div>
 
       {showCopy && (
         <div
-          className={`absolute right-0 ${gutterTop} opacity-0 transition-opacity group-hover/block:opacity-100 pointer-coarse:opacity-70`}
+          className={`absolute right-2 ${gutterTop} opacity-0 transition-opacity group-hover/block:opacity-100 group-focus-within/block:opacity-100 pointer-coarse:opacity-70`}
         >
           <CopyButton text={block.content} label="Copy text" className="p-1" />
         </div>
